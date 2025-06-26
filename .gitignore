@@ -1,0 +1,69 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Jupyter/IPython
+.ipynb_checkpoints/
+*.ipynb
+
+# VSCode/IDE
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# 环境变量/配置
+.env
+.env.*
+
+# 日志/临时文件
+*.log
+*.tmp
+*.bak
+
+# 数据文件
+*.parquet
+*.csv
+*.tsv
+*.xls*
+*.h5
+*.db
+*.sqlite*
+
+# Docker
+*.pid
+*.pid.lock
+docker-compose.override.yml
+
+# pytest/coverage
+.cache/
+.coverage
+htmlcov/
+.tox/
+
+# mypy/pyright
+.mypy_cache/
+.pyright/
+
+# pip
+pip-log.txt
+pip-delete-this-directory.txt
+
+# pyenv/poetry
+.python-version
+.poetry/
+
+# BigQuery/Google credentials
+*.json
+!examples/*.json

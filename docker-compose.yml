@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  data-warehouse-migrate:
+    build: .
+    environment:
+      # MaxCompute配置
+      - MAXCOMPUTE_ACCESS_ID=${MAXCOMPUTE_ACCESS_ID}
+      - MAXCOMPUTE_SECRET_ACCESS_KEY=${MAXCOMPUTE_SECRET_ACCESS_KEY}
+      - MAXCOMPUTE_ENDPOINT=${MAXCOMPUTE_ENDPOINT}
+      
+      # BigQuery配置
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/bigquery-credentials.json
+      
+      # 日志配置
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    
+    volumes:
+      # 挂载BigQuery凭证文件
+      - ${BIGQUERY_CREDENTIALS_PATH}:/app/credentials/bigquery-credentials.json:ro
+    
+    # 示例命令，实际使用时需要替换参数
+    command: [
+      "--source-project-id", "your-maxcompute-project",
+      "--source-table-name", "your-source-table",
+      "--destination-project-id", "your-bigquery-project",
+      "--destination-dataset-id", "your-dataset",
+      "--destination-table-name", "your-target-table",
+      "--mode", "append"
+    ]
