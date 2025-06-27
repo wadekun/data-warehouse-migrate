@@ -2,7 +2,7 @@
 数据迁移核心模块
 """
 
-from typing import Optional
+from typing import Optional, List
 from enum import Enum
 from tqdm import tqdm
 import pandas as pd
@@ -63,6 +63,7 @@ class DataMigrator:
         
         self.schema_mapper = SchemaMapper()
         self._source_schema_cache = {}  # 缓存源表结构
+        self._bigquery_schema_cache = {}  # 缓存BigQuery表结构
     
     def migrate_table(self, 
                      source_table_name: str,
@@ -210,11 +211,13 @@ class DataMigrator:
                 # 根据源表结构进行数据类型处理
                 typed_df = self._apply_source_schema_types(batch_df, source_table_name)
 
+                # 加载数据到BigQuery
                 self.bigquery_client.load_data_from_dataframe(
                     destination_dataset_id,
                     destination_table_name,
                     typed_df,
-                    write_disposition
+                    write_disposition,
+                    table_schema=self._get_bigquery_schema(source_table_name)
                 )
                 
                 # 第一批后改为追加模式
@@ -477,3 +480,37 @@ class DataMigrator:
                     pass
 
         return optimized_df
+
+    def _get_bigquery_schema(self, source_table_name: str) -> List[bigquery.SchemaField]:
+        """
+        获取BigQuery表结构
+        
+        Args:
+            source_table_name: 源表名
+            
+        Returns:
+            BigQuery SchemaField列表
+        """
+        try:
+            # 使用缓存的BigQuery表结构
+            if source_table_name not in self._bigquery_schema_cache:
+                # 如果缓存中没有，获取源表结构并转换
+                source_columns = self.maxcompute_client.get_table_schema(source_table_name)
+                
+                # 转换为BigQuery结构
+                bigquery_schema = self.schema_mapper.convert_maxcompute_to_bigquery_schema(
+                    source_columns
+                )
+                
+                # 缓存BigQuery表结构
+                self._bigquery_schema_cache[source_table_name] = bigquery_schema
+                logger.info(f"缓存BigQuery表结构 {source_table_name}，共 {len(bigquery_schema)} 列")
+            else:
+                bigquery_schema = self._bigquery_schema_cache[source_table_name]
+                logger.debug(f"使用缓存的BigQuery表结构 {source_table_name}")
+            
+            return bigquery_schema
+            
+        except Exception as e:
+            logger.error(f"获取BigQuery表结构失败: {e}")
+            return None

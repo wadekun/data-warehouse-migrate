@@ -133,7 +133,8 @@ class BigQueryClient:
     def load_data_from_dataframe(self, dataset_id: str, table_id: str,
                                 dataframe: pd.DataFrame,
                                 write_disposition: str = bigquery.WriteDisposition.WRITE_APPEND,
-                                schema: dict = None) -> None:
+                                schema: dict = None,
+                                table_schema: List[bigquery.SchemaField] = None) -> None:
         """
         从DataFrame加载数据到表
 
@@ -143,6 +144,7 @@ class BigQueryClient:
             dataframe: 数据DataFrame
             write_disposition: 写入模式
             schema: 字段名到bigquery类型的映射（可选）
+            table_schema: 预定义的表结构（可选）
         """
         try:
             # 清理DataFrame数据类型
@@ -158,7 +160,13 @@ class BigQueryClient:
 
             job_config = bigquery.LoadJobConfig()
             job_config.write_disposition = write_disposition
-            job_config.autodetect = False  # 使用预定义的schema
+            
+            # 使用预定义的schema
+            if table_schema:
+                job_config.schema = table_schema
+                job_config.autodetect = False
+            else:
+                job_config.autodetect = True
 
             # 添加更多配置来处理数据类型问题
             job_config.allow_quoted_newlines = True
@@ -230,19 +238,17 @@ class BigQueryClient:
         cleaned_df = df.copy()
 
         for column in cleaned_df.columns:
-            col_type = None
-            if schema and column in schema:
-                col_type = schema[column].upper()
-            # 只对schema为数值类型的列尝试转数值
-            if col_type in ["INT64", "FLOAT64", "NUMERIC"]:
-                try:
-                    cleaned_df[column] = pd.to_numeric(cleaned_df[column], errors='coerce')
-                    continue
-                except:
-                    pass
-            # 其余全部强制为字符串
-            cleaned_df[column] = cleaned_df[column].astype(str)
-            cleaned_df[column] = cleaned_df[column].replace(['nan', 'None', 'null'], None)
+            # 只清理特殊值，不强制转换类型
+            if cleaned_df[column].dtype == 'object':
+                # 清理字符串类型的特殊值
+                cleaned_df[column] = cleaned_df[column].replace(['nan', 'None', 'null', '<NA>'], None)
+            elif cleaned_df[column].dtype in ['float64', 'float32']:
+                # 清理浮点数的无穷大值
+                cleaned_df[column] = cleaned_df[column].replace([float('inf'), float('-inf')], None)
+            elif cleaned_df[column].dtype in ['int64', 'int32', 'int16', 'int8']:
+                # 整数类型保持原样，BigQuery会自动处理
+                pass
+
         return cleaned_df
 
     def _ensure_pyarrow_compatibility(self, df: pd.DataFrame) -> pd.DataFrame:
