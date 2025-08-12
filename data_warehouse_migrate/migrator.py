@@ -330,10 +330,10 @@ class DataMigrator:
                     else:
                         full_destination_schema = self._destination_schema_cache[destination_table_name]
 
-                    # 非空列策略校验/处理
-                    typed_df = self._validate_non_nullable_columns_before_write(typed_df, full_destination_schema)
-                    # 有默认值列的填充（保留原有逻辑）
+                    # 先应用默认值（若列非空且存在默认值）
                     typed_df = self._apply_mysql_defaults(typed_df, full_destination_schema)
+                    # 再进行非空列校验/处理
+                    typed_df = self._validate_non_nullable_columns_before_write(typed_df, full_destination_schema)
 
                 # 加载数据到目标
                 self.destination_client.write_dataframe(
@@ -543,14 +543,55 @@ class DataMigrator:
                     # 尝试将默认值转换为适当的类型
                     fill_value = column_default
                     try:
-                        if 'int' in mysql_type or 'bigint' in mysql_type:
-                            fill_value = int(column_default)
-                        elif 'float' in mysql_type or 'double' in mysql_type or 'decimal' in mysql_type:
-                            fill_value = float(column_default)
-                        elif 'boolean' in mysql_type:
+                        lower_type = (mysql_type or '').lower()
+                        if any(t in lower_type for t in ['int', 'bigint', 'tinyint', 'smallint']):
+                            fill_value = int(str(column_default))
+                        elif any(t in lower_type for t in ['float', 'double', 'decimal']):
+                            fill_value = float(str(column_default))
+                        elif 'boolean' in lower_type:
                             # 假设布尔值默认是0或1
-                            fill_value = bool(int(column_default))
-                        # 对于字符串、日期时间等，直接使用原始默认值
+                            fill_value = bool(int(str(column_default)))
+                        elif 'bit' in lower_type:
+                            # 处理 BIT(1) 等位类型默认值，例如 b'0' / b'1' / 0x00 / 0 / 1
+                            ds = str(column_default).strip()
+                            if ds.startswith("b'") and ds.endswith("'"):
+                                inner = ds[2:-1]
+                                if inner in ('0', '1'):
+                                    fill_value = int(inner)
+                                else:
+                                    # 尝试按十六进制或十进制解析
+                                    try:
+                                        fill_value = int(inner, 0)
+                                    except Exception:
+                                        fill_value = 0
+                            elif ds.lower().startswith('0x'):
+                                try:
+                                    val = int(ds, 16)
+                                    fill_value = 1 if val != 0 else 0
+                                except Exception:
+                                    fill_value = 0
+                            elif ds in ('0', '1'):
+                                fill_value = int(ds)
+                            else:
+                                try:
+                                    fill_value = int(ds)
+                                except Exception:
+                                    fill_value = 0
+                        elif any(t in lower_type for t in ['date', 'time', 'timestamp']):
+                            # 处理时间表达式默认值
+                            default_str = str(column_default).strip().upper()
+                            if default_str in ['CURRENT_TIMESTAMP', 'CURRENT_TIMESTAMP()', 'NOW()', 'NOW']:
+                                fill_value = pd.Timestamp.utcnow().to_pydatetime()
+                            else:
+                                # 尝试解析具体时间字符串，否则保留原值让驱动处理
+                                try:
+                                    parsed = pd.to_datetime(column_default, errors='raise')
+                                    fill_value = parsed.to_pydatetime()
+                                except Exception:
+                                    fill_value = column_default
+                        else:
+                            # 字符串等类型直接使用原始默认值
+                            fill_value = column_default
                     except ValueError:
                         logger.warning(f"无法将默认值 '{column_default}' 转换为列 {col_name} 的类型 {mysql_type}，保持原始字符串")
 
