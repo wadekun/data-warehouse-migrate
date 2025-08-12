@@ -76,11 +76,23 @@ class SchemaMapper:
         Returns:
             MySQL列信息列表
         """
-        mysql_schema = []
+        mysql_schema: List[Dict[str, Any]] = []
+        seen_lower_names: set[str] = set()
+
         for column in maxcompute_columns:
+            # 跳过分区列
+            if column.get('is_partition', False):
+                logger.info(f"跳过分区字段（MySQL不创建）: {column.get('name')}")
+                continue
+
             name = column['name']
+            name_lower = name.lower()
+            if name_lower in seen_lower_names:
+                logger.warning(f"检测到重复列名 '{name}'，已去重保留首次出现")
+                continue
+
             maxcompute_type = column['type'].lower()
-            
+
             mysql_type = ""
             if maxcompute_type in ['bigint', 'int', 'smallint', 'tinyint']:
                 mysql_type = 'BIGINT'
@@ -103,8 +115,10 @@ class SchemaMapper:
             # 对于 ARRAY, MAP, STRUCT 等复杂类型，可能需要特殊处理或转换为 JSON 字符串
             else:
                 mysql_type = 'TEXT' # 默认
-            
+
             mysql_schema.append({'name': name, 'type': mysql_type})
+            seen_lower_names.add(name_lower)
+
         return mysql_schema
     
     @classmethod

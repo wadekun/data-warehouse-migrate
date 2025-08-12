@@ -40,7 +40,11 @@ class DataMigrator:
                  mysql_dest_user: Optional[str] = None,
                  mysql_dest_password: Optional[str] = None,
                  mysql_dest_database: Optional[str] = None,
-                 mysql_dest_port: Optional[int] = None):
+                 mysql_dest_port: Optional[int] = None,
+                 preserve_string_null_tokens: bool = True,
+                 string_null_tokens: Optional[List[str]] = None,
+                 null_on_non_nullable: str = 'fail',
+                 null_fill_sentinel: Optional[str] = None):
         """
         初始化数据迁移器
         
@@ -84,6 +88,12 @@ class DataMigrator:
         self.schema_mapper = SchemaMapper()
         self._source_schema_cache = {}  # 缓存源表结构
         self._destination_schema_cache = {}  # 缓存目标表结构
+
+        # 字符串空值与非空策略
+        self.preserve_string_null_tokens = preserve_string_null_tokens
+        self.string_null_tokens = string_null_tokens or ['nan', 'None', 'null', '<NA>', 'NaN']
+        self.null_on_non_nullable = (null_on_non_nullable or 'fail').lower()
+        self.null_fill_sentinel = null_fill_sentinel
 
     def _create_destination_client(self, destination_type: str, **kwargs):
         if destination_type == 'mysql':
@@ -229,6 +239,8 @@ class DataMigrator:
                 destination_schema = self.schema_mapper.convert_maxcompute_to_mysql_schema(
                     maxcompute_columns
                 )
+                # 兜底去重，避免重复列（大小写不敏感）
+                destination_schema = self._dedupe_mysql_schema(destination_schema)
             else:
                 raise ValueError(f"不支持的目标类型: {self.destination_type}")
 
@@ -318,6 +330,9 @@ class DataMigrator:
                     else:
                         full_destination_schema = self._destination_schema_cache[destination_table_name]
 
+                    # 非空列策略校验/处理
+                    typed_df = self._validate_non_nullable_columns_before_write(typed_df, full_destination_schema)
+                    # 有默认值列的填充（保留原有逻辑）
                     typed_df = self._apply_mysql_defaults(typed_df, full_destination_schema)
 
                 # 加载数据到目标
@@ -453,8 +468,12 @@ class DataMigrator:
             # 恢复None值
             result[mask_none] = None
 
-            # 清理字符串表示的None值
-            result = result.replace(['nan', 'None', 'null', '<NA>', 'NaN'], None)
+            # 按配置决定是否将特定 tokens 转换为 None（默认保留字面量，不转换）
+            if not self.preserve_string_null_tokens:
+                tokens = self.string_null_tokens
+                # 同时支持大小写不敏感匹配：先构造小写映射
+                lower_map = {str(t).lower() for t in tokens}
+                result = result.apply(lambda v: None if (isinstance(v, str) and v.strip().lower() in lower_map) else v)
 
             logger.debug(f"列 {column_name} 强制保持为字符串类型，示例值: {result.head().tolist()}")
             return result
@@ -485,8 +504,8 @@ class DataMigrator:
         for column in cleaned_df.columns:
             # 只进行基础清理，不改变数据类型
             if cleaned_df[column].dtype == 'object':
-                # 清理字符串类型的特殊值
-                cleaned_df[column] = cleaned_df[column].replace(['nan', 'None', 'null', '<NA>'], None)
+                # 字符串列默认不把字面量空值标记替换为 None，保留字面量
+                pass
             elif cleaned_df[column].dtype in ['float64', 'float32']:
                 # 清理浮点数的无穷大值
                 cleaned_df[column] = cleaned_df[column].replace([float('inf'), float('-inf')], None)
@@ -537,5 +556,91 @@ class DataMigrator:
 
                     modified_df[col_name] = modified_df[col_name].fillna(fill_value)
         return modified_df
+
+    def _dedupe_mysql_schema(self, schema: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        对MySQL目标schema按小写列名去重，保留首次出现；记录被丢弃的重复列。
+        """
+        deduped: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        dropped: List[str] = []
+        for col in schema:
+            name = col.get('name')
+            if not name:
+                continue
+            lower = name.lower()
+            if lower in seen:
+                dropped.append(name)
+                continue
+            seen.add(lower)
+            deduped.append(col)
+        if dropped:
+            logger.warning(f"MySQL建表去重：丢弃重复列 {', '.join(dropped)}")
+        return deduped
+
+    def _validate_non_nullable_columns_before_write(self, df: pd.DataFrame, destination_schema: List[Dict[str, Any]]) -> pd.DataFrame:
+        """
+        在写入前校验非空列中的空值，根据策略 fail/fill/skip 处理。
+        仅对字符串/日期列在 fill 时使用哨兵值；数值列遇到空值仍失败。
+        """
+        if df is None or df.empty:
+            return df
+
+        policy = self.null_on_non_nullable
+        if policy not in ['fail', 'fill', 'skip']:
+            policy = 'fail'
+
+        # 构建列信息映射
+        col_info_map = {c['name'].lower(): c for c in destination_schema}
+        non_nullable_cols = [c['name'] for c in destination_schema if not c.get('is_nullable', True)]
+
+        if not non_nullable_cols:
+            return df
+
+        working_df = df.copy()
+        rows_before = len(working_df)
+
+        null_violations = {}
+        for col in working_df.columns:
+            info = col_info_map.get(col.lower())
+            if not info:
+                continue
+            if not info.get('is_nullable', True):
+                # 统计空值
+                null_mask = working_df[col].isnull()
+                null_count = int(null_mask.sum())
+                if null_count > 0:
+                    null_violations[col] = null_count
+                    if policy == 'fill':
+                        mysql_type = (info.get('type') or '').lower()
+                        # 仅字符串/日期列填充
+                        if any(t in mysql_type for t in ['char', 'text', 'blob', 'date', 'time', 'year']):
+                            sentinel = self.null_fill_sentinel if self.null_fill_sentinel is not None else ''
+                            working_df.loc[null_mask, col] = sentinel
+                        else:
+                            # 数值列不自动填充，仍按 fail 处理
+                            pass
+                    elif policy == 'skip':
+                        # 将在循环结束统一过滤
+                        pass
+
+        if null_violations:
+            if policy == 'fail':
+                details = ', '.join([f"{k}={v}" for k, v in null_violations.items()])
+                raise DataMigrationError(f"写入前校验失败：非空列包含NULL。详情: {details}")
+            if policy == 'skip':
+                # 过滤含任一非空列空值的行
+                mask_keep = pd.Series(True, index=working_df.index)
+                for col, _ in null_violations.items():
+                    mask_keep &= working_df[col].notnull()
+                dropped = int((~mask_keep).sum())
+                if dropped > 0:
+                    logger.warning(f"根据策略 skip，过滤掉 {dropped} 行包含非空列NULL的记录")
+                working_df = working_df[mask_keep]
+
+        rows_after = len(working_df)
+        if rows_after != rows_before:
+            logger.info(f"写入前校验处理完成：行数 {rows_before} -> {rows_after}")
+        return working_df
 
     

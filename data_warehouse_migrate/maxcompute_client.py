@@ -366,8 +366,15 @@ class MaxComputeClient:
         # 对于字符串类型，只清理明显的NULL表示
         if isinstance(value, str):
             stripped = value.strip()
-            if stripped.lower() in ['null', 'none', '']:
-                return None
+            # 默认不将诸如 'null'/'none' 的字面量转为 None，仅可选将空串视为 None
+            if stripped == '':
+                # 是否将空字符串视为 None 可由配置控制
+                try:
+                    from .config import config
+                    if config.treat_empty_string_as_null:
+                        return None
+                except Exception:
+                    pass
             return value  # 保持原始字符串值
 
         # 其他类型直接返回

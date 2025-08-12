@@ -240,8 +240,8 @@ class BigQueryClient:
         for column in cleaned_df.columns:
             # 只清理特殊值，不强制转换类型
             if cleaned_df[column].dtype == 'object':
-                # 清理字符串类型的特殊值
-                cleaned_df[column] = cleaned_df[column].replace(['nan', 'None', 'null', '<NA>'], None)
+                # 默认不将字面量空值标记替换为 None，保持字符串字面量
+                pass
             elif cleaned_df[column].dtype in ['float64', 'float32']:
                 # 清理浮点数的无穷大值
                 cleaned_df[column] = cleaned_df[column].replace([float('inf'), float('-inf')], None)
@@ -304,30 +304,16 @@ class BigQueryClient:
 
                 # 处理object类型中可能的问题
                 elif dtype == 'object':
-                    # 对于object类型，强制确保为字符串类型
+                    # 对于object类型，尽量保持字符串字面量，仅做必要的安全转换
                     logger.debug(f"处理object类型列: {column}")
-
-                    # 检查是否包含复杂对象
-                    sample_values = compatible_df[column].dropna().head(10)
-                    if len(sample_values) > 0:
-                        # 强制转换为字符串类型
-                        try:
-                            # 保存None值的位置
-                            mask_none = compatible_df[column].isna()
-
-                            # 转换为字符串
-                            compatible_df[column] = compatible_df[column].astype(str)
-
-                            # 恢复None值
-                            compatible_df.loc[mask_none, column] = None
-
-                            # 清理字符串表示的None值
-                            compatible_df[column] = compatible_df[column].replace(['nan', 'None', 'null', '<NA>', 'NaN'], None)
-
-                            logger.debug(f"列 {column} 强制转换为字符串类型")
-                        except Exception as e:
-                            logger.warning(f"列 {column} 字符串转换失败: {e}，用None填充")
-                            compatible_df[column] = None
+                    try:
+                        # 保存None位置并转换为字符串，不替换字面量空值
+                        mask_none = compatible_df[column].isna()
+                        compatible_df[column] = compatible_df[column].astype(str)
+                        compatible_df.loc[mask_none, column] = None
+                    except Exception as e:
+                        logger.warning(f"列 {column} 字符串转换失败: {e}，用None填充")
+                        compatible_df[column] = None
 
                 # 最后检查：确保没有复杂的嵌套结构
                 if compatible_df[column].dtype == 'object':

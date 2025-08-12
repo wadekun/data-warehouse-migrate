@@ -44,6 +44,16 @@ class Config:
         
         # 日志配置
         self.log_level = os.getenv('LOG_LEVEL', 'INFO')
+
+        # 字符串空值与非空约束策略配置
+        self.preserve_string_null_tokens = os.getenv('PRESERVE_STRING_NULL_TOKENS', 'true').strip().lower() in ['1', 'true', 'yes', 'y']
+        self.string_null_tokens = [
+            tok.strip() for tok in os.getenv('STRING_NULL_TOKENS', 'nan,None,null,<NA>,NaN').split(',') if tok.strip()
+        ]
+        self.string_null_tokens_case_insensitive = os.getenv('STRING_NULL_TOKENS_CASE_INSENSITIVE', 'true').strip().lower() in ['1', 'true', 'yes', 'y']
+        self.treat_empty_string_as_null = os.getenv('TREAT_EMPTY_STRING_AS_NULL', 'false').strip().lower() in ['1', 'true', 'yes', 'y']
+        self.null_on_non_nullable = os.getenv('NULL_ON_NON_NULLABLE', 'fail').strip().lower()
+        self.null_fill_sentinel = os.getenv('NULL_FILL_SENTINEL')
         
     def validate_maxcompute_config(self) -> bool:
         """验证MaxCompute配置"""

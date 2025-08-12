@@ -63,6 +63,19 @@ logger = setup_logger(__name__)
               type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR'], case_sensitive=False),
               default='INFO',
               help='日志级别，默认为INFO')
+@click.option('--preserve-string-null-tokens/--no-preserve-string-null-tokens',
+              default=None,
+              help='是否在字符串列中保留字面量空值标记（NULL/None/NaN等）。默认取环境变量配置，未设置时为保留')
+@click.option('--string-null-tokens',
+              default=None,
+              help='逗号分隔的字符串空值标记列表，例如: "nan,None,null,<NA>,NaN"')
+@click.option('--null-on-non-nullable',
+              type=click.Choice(['fail', 'fill', 'skip'], case_sensitive=False),
+              default=None,
+              help='当写入非空列遇到NULL时的策略：fail（报错）、fill（填充哨兵值）、skip（跳过含NULL的行）')
+@click.option('--null-fill-sentinel',
+              default=None,
+              help='当策略为fill时用于填充字符串/日期列的哨兵值，如 "N/A" 或 空字符串')
 @click.option('--dry-run',
               is_flag=True,
               help='试运行模式，只检查连接和表结构，不实际迁移数据')
@@ -83,6 +96,10 @@ def main(source_project_id: str,
          mysql_dest_password: Optional[str],
          mysql_dest_database: Optional[str],
          mysql_dest_port: Optional[int],
+         preserve_string_null_tokens: Optional[bool],
+         string_null_tokens: Optional[str],
+         null_on_non_nullable: Optional[str],
+         null_fill_sentinel: Optional[str],
          log_level: str,
          dry_run: bool):
     """
@@ -130,6 +147,19 @@ def main(source_project_id: str,
             mysql_dest_port
         )
         
+        # 解析字符串空值与非空策略参数（优先CLI，其次环境配置）
+        preserve_tokens = (
+            preserve_string_null_tokens
+            if preserve_string_null_tokens is not None
+            else config.preserve_string_null_tokens
+        )
+        tokens = (
+            [tok.strip() for tok in string_null_tokens.split(',')] if string_null_tokens
+            else config.string_null_tokens
+        )
+        null_policy = (null_on_non_nullable or config.null_on_non_nullable).lower()
+        null_sentinel = null_fill_sentinel if null_fill_sentinel is not None else config.null_fill_sentinel
+
         # 创建迁移器
         migrator = DataMigrator(
             source_project_id=source_project_id,
@@ -143,7 +173,11 @@ def main(source_project_id: str,
             mysql_dest_user=mysql_dest_user,
             mysql_dest_password=mysql_dest_password,
             mysql_dest_database=mysql_dest_database,
-            mysql_dest_port=mysql_dest_port
+            mysql_dest_port=mysql_dest_port,
+            preserve_string_null_tokens=preserve_tokens,
+            string_null_tokens=tokens,
+            null_on_non_nullable=null_policy,
+            null_fill_sentinel=null_sentinel
         )
         
         # 转换迁移模式
@@ -152,7 +186,7 @@ def main(source_project_id: str,
         if dry_run:
             # 试运行模式
             click.echo("开始试运行...")
-            _dry_run(migrator, source_table_name, destination_table_name)
+            _dry_run(migrator, source_table_name, destination_table_name, destination_dataset_id)
             click.echo("试运行完成！")
         else:
             # 实际迁移
@@ -236,7 +270,8 @@ def _validate_configuration(destination_type: str,
 
 def _dry_run(migrator: DataMigrator, 
             source_table_name: str,
-            destination_table_name: str) -> None:
+            destination_table_name: str,
+            destination_dataset_id: Optional[str] = None) -> None:
     """试运行"""
     
     click.echo("1. 测试数据库连接...")
@@ -269,7 +304,19 @@ def _dry_run(migrator: DataMigrator,
         click.echo(f"   ✓ 成功转换 {len(destination_schema)} 列到MySQL格式")
     
     click.echo("5. 检查目标表...")
-    table_exists = migrator.destination_client.table_exists(destination_table_name)
+    if migrator.destination_type == 'mysql':
+        table_exists = migrator.destination_client.table_exists(
+            migrator.destination_client.database,
+            destination_table_name
+        )
+    else:
+        if not destination_dataset_id:
+            click.echo("   ✗ 未提供BigQuery目标数据集ID，无法检查目标表")
+            return
+        table_exists = migrator.destination_client.table_exists(
+            destination_dataset_id,
+            destination_table_name
+        )
     if table_exists:
         click.echo("   ✓ 目标表已存在")
     else:

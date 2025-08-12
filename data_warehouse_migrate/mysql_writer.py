@@ -20,16 +20,25 @@ class MySQLWriter:
         return create_engine(connection_string)
 
     def create_table(self, table_name: str, schema: List[Dict[str, Any]], mode: str):
-        with self.engine.connect() as connection:
-            # If mode is overwrite, the table should have been truncated already
-            # No need to drop table here
+        # 安全去重（按小写列名保留首次出现）
+        deduped: List[Dict[str, Any]] = []
+        seen_lower: set[str] = set()
+        for col in schema:
+            name = col['name']
+            lower = name.lower()
+            if lower in seen_lower:
+                # 无日志对象，这里直接跳过；去重已在更上层记录
+                continue
+            seen_lower.add(lower)
+            deduped.append(col)
 
+        with self.engine.connect() as connection:
             columns_sql = []
-            for col in schema:
+            for col in deduped:
                 col_name = col['name']
                 col_type = col['type']
                 columns_sql.append(f"`{col_name}` {col_type}")
-            
+
             create_table_sql = f"CREATE TABLE `{table_name}` ({', '.join(columns_sql)})"
             connection.execute(text(create_table_sql))
             connection.commit()
