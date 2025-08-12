@@ -104,7 +104,7 @@ class DataMigrator:
                 user=kwargs.get('mysql_dest_user'),
                 password=kwargs.get('mysql_dest_password'),
                 database=kwargs.get('mysql_dest_database'),
-                port=kwargs.get('mysql_dest_port', 3306)
+                port=(kwargs.get('mysql_dest_port') or 3306)
             )
         elif destination_type == 'bigquery':
             if not all([kwargs.get('bigquery_credentials_path'), kwargs.get('destination_project_id')]):
