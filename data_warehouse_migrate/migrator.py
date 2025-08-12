@@ -2,7 +2,7 @@
 数据迁移核心模块
 """
 
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from enum import Enum
 from tqdm import tqdm
 import pandas as pd
@@ -11,8 +11,9 @@ from google.cloud import bigquery
 
 from .maxcompute_client import MaxComputeClient
 from .bigquery_client import BigQueryClient
+from .mysql_writer import MySQLWriter
 from .schema_mapper import SchemaMapper
-from .exceptions import DataMigrationError
+from .exceptions import DataMigrationError, ConfigurationError
 from .logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -29,26 +30,38 @@ class DataMigrator:
     
     def __init__(self, 
                  source_project_id: str,
-                 destination_project_id: str,
+                 destination_type: str,
+                 destination_project_id: Optional[str] = None,
                  maxcompute_access_id: Optional[str] = None,
                  maxcompute_secret_key: Optional[str] = None,
                  maxcompute_endpoint: Optional[str] = None,
-                 bigquery_credentials_path: Optional[str] = None):
+                 bigquery_credentials_path: Optional[str] = None,
+                 mysql_dest_host: Optional[str] = None,
+                 mysql_dest_user: Optional[str] = None,
+                 mysql_dest_password: Optional[str] = None,
+                 mysql_dest_database: Optional[str] = None,
+                 mysql_dest_port: Optional[int] = None):
         """
         初始化数据迁移器
         
         Args:
             source_project_id: MaxCompute项目ID
-            destination_project_id: BigQuery项目ID
+            destination_type: 目标数据源类型 (bigquery 或 mysql)
+            destination_project_id: BigQuery项目ID (仅当destination_type为bigquery时需要)
             maxcompute_access_id: MaxCompute AccessKey ID
             maxcompute_secret_key: MaxCompute AccessKey Secret
             maxcompute_endpoint: MaxCompute endpoint
             bigquery_credentials_path: BigQuery凭证文件路径
+            mysql_dest_host: MySQL目标主机
+            mysql_dest_user: MySQL目标用户名
+            mysql_dest_password: MySQL目标密码
+            mysql_dest_database: MySQL目标数据库
+            mysql_dest_port: MySQL目标端口
         """
         self.source_project_id = source_project_id
-        self.destination_project_id = destination_project_id
+        self.destination_type = destination_type
         
-        # 初始化客户端
+        # 初始化MaxCompute客户端
         self.maxcompute_client = MaxComputeClient(
             access_id=maxcompute_access_id,
             secret_access_key=maxcompute_secret_key,
@@ -56,58 +69,85 @@ class DataMigrator:
             project=source_project_id
         )
         
-        self.bigquery_client = BigQueryClient(
-            project_id=destination_project_id,
-            credentials_path=bigquery_credentials_path
+        # 初始化目标客户端
+        self.destination_client = self._create_destination_client(
+            destination_type,
+            destination_project_id=destination_project_id,
+            bigquery_credentials_path=bigquery_credentials_path,
+            mysql_dest_host=mysql_dest_host,
+            mysql_dest_user=mysql_dest_user,
+            mysql_dest_password=mysql_dest_password,
+            mysql_dest_database=mysql_dest_database,
+            mysql_dest_port=mysql_dest_port
         )
         
         self.schema_mapper = SchemaMapper()
         self._source_schema_cache = {}  # 缓存源表结构
-        self._bigquery_schema_cache = {}  # 缓存BigQuery表结构
+        self._destination_schema_cache = {}  # 缓存目标表结构
+
+    def _create_destination_client(self, destination_type: str, **kwargs):
+        if destination_type == 'mysql':
+            if not all([kwargs.get('mysql_dest_host'), kwargs.get('mysql_dest_user'), kwargs.get('mysql_dest_password'), kwargs.get('mysql_dest_database')]):
+                raise ConfigurationError("MySQL目标配置不完整")
+            return MySQLWriter(
+                host=kwargs.get('mysql_dest_host'),
+                user=kwargs.get('mysql_dest_user'),
+                password=kwargs.get('mysql_dest_password'),
+                database=kwargs.get('mysql_dest_database'),
+                port=kwargs.get('mysql_dest_port', 3306)
+            )
+        elif destination_type == 'bigquery':
+            if not all([kwargs.get('bigquery_credentials_path'), kwargs.get('destination_project_id')]):
+                raise ConfigurationError("BigQuery凭证路径或项目ID未提供")
+            return BigQueryClient(
+                project_id=kwargs.get('destination_project_id'),
+                credentials_path=kwargs.get('bigquery_credentials_path')
+            )
+        else:
+            raise ValueError(f"不支持的目标类型: {destination_type}")
     
     def migrate_table(self, 
                      source_table_name: str,
-                     destination_dataset_id: str,
                      destination_table_name: str,
                      mode: MigrationMode = MigrationMode.APPEND,
-                     batch_size: int = 10000) -> None:
+                     batch_size: int = 10000,
+                     destination_dataset_id: Optional[str] = None,
+                     destination_database: Optional[str] = None) -> None:
         """
         迁移表数据
         
         Args:
             source_table_name: 源表名
-            destination_dataset_id: 目标数据集ID
             destination_table_name: 目标表名
             mode: 迁移模式
             batch_size: 批次大小
+            destination_dataset_id: BigQuery目标数据集ID (仅当destination_type为bigquery时需要)
+            destination_database: MySQL目标数据库名 (仅当destination_type为mysql时需要)
         """
         try:
-            logger.info(f"开始迁移表: {source_table_name} -> {destination_dataset_id}.{destination_table_name}")
+            logger.info(f"开始迁移表: {source_table_name} -> {destination_table_name}")
             
             # 1. 测试连接
             self._test_connections()
             
-            # 2. 创建数据集（如果不存在）
-            self.bigquery_client.create_dataset_if_not_exists(destination_dataset_id)
-            
-            # 3. 处理表结构
+            # 2. 处理表结构
             self._handle_table_schema(
                 source_table_name, 
-                destination_dataset_id, 
                 destination_table_name, 
-                mode
+                mode,
+                destination_dataset_id,
+                destination_database
             )
             
-            # 4. 迁移数据
+            # 3. 迁移数据
             self._migrate_table_data(
                 source_table_name,
-                destination_dataset_id,
                 destination_table_name,
                 mode,
                 batch_size
             )
             
-            logger.info(f"表迁移完成: {source_table_name} -> {destination_dataset_id}.{destination_table_name}")
+            logger.info(f"表迁移完成: {source_table_name} -> {destination_table_name}")
             
         except Exception as e:
             logger.error(f"表迁移失败: {e}")
@@ -120,34 +160,53 @@ class DataMigrator:
         if not self.maxcompute_client.test_connection():
             raise DataMigrationError("MaxCompute连接失败")
         
-        if not self.bigquery_client.test_connection():
-            raise DataMigrationError("BigQuery连接失败")
+        if not self.destination_client._test_connection():
+            raise DataMigrationError(f"目标数据库 ({self.destination_type}) 连接失败")
         
         logger.info("数据库连接测试通过")
     
     def _handle_table_schema(self, 
                            source_table_name: str,
-                           destination_dataset_id: str,
                            destination_table_name: str,
-                           mode: MigrationMode) -> None:
+                           mode: MigrationMode,
+                           destination_dataset_id: Optional[str] = None,
+                           destination_database: Optional[str] = None) -> None:
         """处理表结构"""
         logger.info("处理表结构...")
         
         # 检查目标表是否存在
-        table_exists = self.bigquery_client.table_exists(
-            destination_dataset_id, 
-            destination_table_name
-        )
+        if self.destination_type == 'bigquery':
+            if not destination_dataset_id:
+                raise ConfigurationError("BigQuery目标数据集ID未提供")
+            # BigQuery需要先创建数据集
+            self.destination_client.create_dataset_if_not_exists(destination_dataset_id)
+            table_exists = self.destination_client.table_exists(
+                destination_dataset_id,
+                destination_table_name
+            )
+        elif self.destination_type == 'mysql':
+            if not destination_database:
+                raise ConfigurationError("MySQL目标数据库名未提供")
+            table_exists = self.destination_client.table_exists(
+                destination_database,
+                destination_table_name
+            )
+        else:
+            raise ValueError(f"不支持的目标类型: {self.destination_type}")
         
         if table_exists:
             if mode == MigrationMode.OVERWRITE:
-                logger.info("目标表已存在，删除并重新创建")
-                self.bigquery_client.delete_table(
-                    destination_dataset_id, 
-                    destination_table_name
-                )
-                table_exists = False
-            else:
+                if self.destination_type == 'mysql':
+                    logger.info("目标MySQL表已存在，执行TRUNCATE TABLE清空数据")
+                    self.destination_client.truncate_table(destination_table_name)
+                else: # BigQuery overwrite logic (drop and recreate)
+                    logger.info("目标BigQuery表已存在，删除并重新创建")
+                    self.destination_client.delete_table(
+                        destination_dataset_id,
+                        destination_table_name
+                    )
+                    table_exists = False # Recreate table
+            else: # mode == MigrationMode.APPEND
                 logger.info("目标表已存在，将追加数据")
         
         if not table_exists:
@@ -160,41 +219,74 @@ class DataMigrator:
             logger.info(f"获取源表 {source_table_name} 的结构")
             maxcompute_columns = self.maxcompute_client.get_table_schema(source_table_name)
 
-            # 转换为BigQuery结构
+            # 转换为目标结构
             logger.info("转换表结构")
-            bigquery_schema = self.schema_mapper.convert_maxcompute_to_bigquery_schema(
-                maxcompute_columns
-            )
+            if self.destination_type == 'bigquery':
+                destination_schema = self.schema_mapper.convert_maxcompute_to_bigquery_schema(
+                    maxcompute_columns
+                )
+            elif self.destination_type == 'mysql':
+                destination_schema = self.schema_mapper.convert_maxcompute_to_mysql_schema(
+                    maxcompute_columns
+                )
+            else:
+                raise ValueError(f"不支持的目标类型: {self.destination_type}")
 
             # 创建目标表
-            logger.info(f"创建目标表 {destination_dataset_id}.{destination_table_name}")
-            self.bigquery_client.create_table(
-                destination_dataset_id,
-                destination_table_name,
-                bigquery_schema,
-                f"从MaxCompute表 {source_table_name} 迁移"
-            )
+            logger.info(f"创建目标表 {destination_table_name}")
+            if self.destination_type == 'bigquery':
+                self.destination_client.create_table(
+                    destination_dataset_id,
+                    destination_table_name,
+                    destination_schema,
+                    f"从MaxCompute表 {source_table_name} 迁移"
+                )
+            elif self.destination_type == 'mysql':
+                self.destination_client.create_table(
+                    destination_table_name,
+                    destination_schema,
+                    mode.value
+                )
+            else:
+                raise ValueError(f"不支持的目标类型: {self.destination_type}")
     
     def _migrate_table_data(self, 
                           source_table_name: str,
-                          destination_dataset_id: str,
                           destination_table_name: str,
                           mode: MigrationMode,
                           batch_size: int) -> None:
         """迁移表数据"""
         logger.info("开始迁移数据...")
+
+        # Get source schema (already available)
+        maxcompute_columns = self.maxcompute_client.get_table_schema(source_table_name)
+        maxcompute_column_names = {col['name'].lower() for col in maxcompute_columns if not col.get('is_partition', False)}
+
+        # Get destination schema
+        destination_columns = []
+        if self.destination_type == 'mysql':
+            destination_columns = self.destination_client.get_table_schema(destination_table_name)
+        # Add BigQuery schema retrieval if needed for future comparison, but for now, focus on MySQL
+        # elif self.destination_type == 'bigquery':
+        #     destination_columns = self.bigquery_client.get_table_schema(destination_dataset_id, destination_table_name)
+
+        destination_column_names = {col['name'].lower() for col in destination_columns}
+
+        # Compare schemas and find common columns
+        common_columns = list(maxcompute_column_names.intersection(destination_column_names))
         
-        # 确定写入模式
-        write_disposition = (
-            bigquery.WriteDisposition.WRITE_TRUNCATE 
-            if mode == MigrationMode.OVERWRITE 
-            else bigquery.WriteDisposition.WRITE_APPEND
-        )
-        
-        # 分批读取和写入数据
+        # Identify discrepancies
+        source_only_columns = maxcompute_column_names.difference(destination_column_names)
+        destination_only_columns = destination_column_names.difference(maxcompute_column_names)
+
+        if source_only_columns:
+            logger.warning(f"源表 {source_table_name} 包含目标表 {destination_table_name} 中不存在的字段: {', '.join(source_only_columns)}")
+        if destination_only_columns:
+            logger.warning(f"目标表 {destination_table_name} 包含源表 {source_table_name} 中不存在的字段: {', '.join(destination_only_columns)}")
+
         batch_count = 0
         total_rows = 0
-        
+
         try:
             data_iterator = self.maxcompute_client.get_table_data(
                 source_table_name, 
@@ -208,21 +300,32 @@ class DataMigrator:
                 
                 logger.debug(f"处理第 {batch_count} 批数据，行数: {batch_rows}")
 
-                # 根据源表结构进行数据类型处理
-                typed_df = self._apply_source_schema_types(batch_df, source_table_name)
+                # Filter DataFrame to only include common columns
+                # Ensure column names are lowercased for comparison
+                df_columns_lower = {col.lower(): col for col in batch_df.columns}
+                filtered_columns = [df_columns_lower[col_name] for col_name in common_columns if col_name in df_columns_lower]
+                
+                # Only select columns that are in both source and target
+                typed_df = self._apply_source_schema_types(batch_df[filtered_columns], source_table_name)
 
-                # 加载数据到BigQuery
-                self.bigquery_client.load_data_from_dataframe(
-                    destination_dataset_id,
+                # Apply MySQL defaults for non-nullable columns if destination is MySQL
+                if self.destination_type == 'mysql':
+                    # Get destination schema (full info including nullability and defaults)
+                    # Cache this to avoid repeated calls
+                    if destination_table_name not in self._destination_schema_cache:
+                        full_destination_schema = self.destination_client.get_table_schema(destination_table_name)
+                        self._destination_schema_cache[destination_table_name] = full_destination_schema
+                    else:
+                        full_destination_schema = self._destination_schema_cache[destination_table_name]
+
+                    typed_df = self._apply_mysql_defaults(typed_df, full_destination_schema)
+
+                # 加载数据到目标
+                self.destination_client.write_dataframe(
                     destination_table_name,
                     typed_df,
-                    write_disposition,
-                    table_schema=self._get_bigquery_schema(source_table_name)
+                    mode.value # Pass mode as string (overwrite/append)
                 )
-                
-                # 第一批后改为追加模式
-                if write_disposition == bigquery.WriteDisposition.WRITE_TRUNCATE:
-                    write_disposition = bigquery.WriteDisposition.WRITE_APPEND
             
             logger.info(f"数据迁移完成，总共处理 {batch_count} 批次，{total_rows} 行数据")
             
@@ -390,127 +493,49 @@ class DataMigrator:
 
         return cleaned_df
 
-    def _optimize_dataframe_types(self, df):
+    def _apply_mysql_defaults(self, df: pd.DataFrame, destination_schema: List[Dict[str, Any]]) -> pd.DataFrame:
         """
-        优化DataFrame的数据类型，确保与BigQuery兼容
-
-        Args:
-            df: 原始DataFrame
-
-        Returns:
-            优化后的DataFrame
-        """
-        import pandas as pd
-        import numpy as np
-
-        optimized_df = df.copy()
-
-        for column in optimized_df.columns:
-            try:
-                # 获取列的数据类型
-                dtype = optimized_df[column].dtype
-
-                # 处理object类型（通常是字符串或混合类型）
-                if dtype == 'object':
-                    # 首先检查源表的数据类型信息，避免错误的类型推断
-                    should_convert_to_numeric = self._should_convert_to_numeric(column, optimized_df[column])
-
-                    if should_convert_to_numeric:
-                        # 检查是否可以转换为数值类型
-                        sample_values = optimized_df[column].dropna().head(100)
-                        if len(sample_values) > 0:
-                            # 尝试转换为数值
-                            try:
-                                # 检查是否都是数字字符串
-                                numeric_values = pd.to_numeric(sample_values, errors='coerce')
-                                if not numeric_values.isna().all():
-                                    # 如果大部分值可以转换为数字
-                                    if numeric_values.notna().sum() / len(sample_values) > 0.9:  # 提高阈值到90%
-                                        # 检查是否为整数
-                                        if all(float(x).is_integer() for x in numeric_values.dropna()):
-                                            # 转换为数值类型，但使用标准的int64/float64
-                                            converted_series = pd.to_numeric(optimized_df[column], errors='coerce')
-                                            if converted_series.isna().any():
-                                                # 有NaN值时使用float64
-                                                optimized_df[column] = converted_series.astype('float64')
-                                                logger.debug(f"列 {column} 转换为float64类型（包含NaN）")
-                                            else:
-                                                # 没有NaN值时使用int64
-                                                optimized_df[column] = converted_series.astype('int64')
-                                                logger.debug(f"列 {column} 转换为int64类型")
-                                        else:
-                                            optimized_df[column] = pd.to_numeric(optimized_df[column], errors='coerce').astype('float64')
-                                            logger.debug(f"列 {column} 转换为float64类型")
-                                        continue
-                            except:
-                                pass
-
-                    # 保持为字符串类型，但清理特殊值
-                    optimized_df[column] = optimized_df[column].astype(str)
-                    optimized_df[column] = optimized_df[column].replace(['nan', 'None', 'null', '<NA>'], None)
-                    logger.debug(f"列 {column} 保持为字符串类型")
-
-                # 处理整数类型，转换为float64以兼容pyarrow
-                elif dtype in ['int64', 'int32', 'int16', 'int8']:
-                    # 检查是否有NaN值
-                    if optimized_df[column].isna().any():
-                        # 有NaN值时转换为float64
-                        optimized_df[column] = optimized_df[column].astype('float64')
-                        logger.debug(f"列 {column} 包含NaN值，转换为float64类型")
-                    else:
-                        # 没有NaN值时保持int64
-                        optimized_df[column] = optimized_df[column].astype('int64')
-                        logger.debug(f"列 {column} 保持int64类型")
-
-                # 处理浮点数类型，清理无穷大值
-                elif dtype in ['float64', 'float32']:
-                    optimized_df[column] = optimized_df[column].replace([np.inf, -np.inf], None)
-
-                # 处理布尔类型，使用标准bool类型
-                elif dtype == 'bool':
-                    optimized_df[column] = optimized_df[column].astype('bool')
-
-            except Exception as e:
-                logger.warning(f"优化列 {column} 的数据类型时出错: {e}")
-                # 如果优化失败，确保至少是字符串类型
-                try:
-                    optimized_df[column] = optimized_df[column].astype(str)
-                    optimized_df[column] = optimized_df[column].replace(['nan', 'None', 'null'], None)
-                except:
-                    pass
-
-        return optimized_df
-
-    def _get_bigquery_schema(self, source_table_name: str) -> List[bigquery.SchemaField]:
-        """
-        获取BigQuery表结构
+        根据MySQL目标表的非空约束和默认值，填充DataFrame中的NULL值。
         
         Args:
-            source_table_name: 源表名
+            df: 原始DataFrame
+            destination_schema: 目标表的schema信息，包含is_nullable和column_default
             
         Returns:
-            BigQuery SchemaField列表
+            填充了默认值的DataFrame
         """
-        try:
-            # 使用缓存的BigQuery表结构
-            if source_table_name not in self._bigquery_schema_cache:
-                # 如果缓存中没有，获取源表结构并转换
-                source_columns = self.maxcompute_client.get_table_schema(source_table_name)
-                
-                # 转换为BigQuery结构
-                bigquery_schema = self.schema_mapper.convert_maxcompute_to_bigquery_schema(
-                    source_columns
-                )
-                
-                # 缓存BigQuery表结构
-                self._bigquery_schema_cache[source_table_name] = bigquery_schema
-                logger.info(f"缓存BigQuery表结构 {source_table_name}，共 {len(bigquery_schema)} 列")
-            else:
-                bigquery_schema = self._bigquery_schema_cache[source_table_name]
-                logger.debug(f"使用缓存的BigQuery表结构 {source_table_name}")
-            
-            return bigquery_schema
-            
-        except Exception as e:
-            logger.error(f"获取BigQuery表结构失败: {e}")
-            return None
+        modified_df = df.copy()
+        
+        # 创建从列名到其默认值和可空性的映射
+        mysql_column_info = {col['name'].lower(): col for col in destination_schema}
+
+        for col_name in modified_df.columns:
+            lower_col_name = col_name.lower()
+            if lower_col_name in mysql_column_info:
+                col_info = mysql_column_info[lower_col_name]
+                is_nullable = col_info.get('is_nullable')
+                column_default = col_info.get('column_default')
+                mysql_type = col_info.get('type')
+
+                # 只有当列不可为空且有默认值，并且DataFrame列中包含NULL时才应用默认值
+                if not is_nullable and column_default is not None and modified_df[col_name].isnull().any():
+                    logger.debug(f"列 {col_name} 为非空且有默认值 '{column_default}'，填充NULL值")
+                    
+                    # 尝试将默认值转换为适当的类型
+                    fill_value = column_default
+                    try:
+                        if 'int' in mysql_type or 'bigint' in mysql_type:
+                            fill_value = int(column_default)
+                        elif 'float' in mysql_type or 'double' in mysql_type or 'decimal' in mysql_type:
+                            fill_value = float(column_default)
+                        elif 'boolean' in mysql_type:
+                            # 假设布尔值默认是0或1
+                            fill_value = bool(int(column_default))
+                        # 对于字符串、日期时间等，直接使用原始默认值
+                    except ValueError:
+                        logger.warning(f"无法将默认值 '{column_default}' 转换为列 {col_name} 的类型 {mysql_type}，保持原始字符串")
+
+                    modified_df[col_name] = modified_df[col_name].fillna(fill_value)
+        return modified_df
+
+    

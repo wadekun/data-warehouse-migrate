@@ -1,6 +1,6 @@
 # data-warehouse-migrate
 
-数仓迁移工具，支持从阿里云MaxCompute迁移数据到Google Cloud BigQuery。
+数仓迁移工具，支持从阿里云MaxCompute迁移数据到Google Cloud BigQuery，**现在也支持从MaxCompute迁移数据到MySQL**。
 
 ## 功能特性
 
@@ -50,6 +50,13 @@ MAXCOMPUTE_ENDPOINT=http://service.cn.maxcompute.aliyun.com/api
 # BigQuery配置
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/bigquery-credentials.json
 
+# MySQL目标配置
+MYSQL_DEST_HOST=your_mysql_host
+MYSQL_DEST_USER=your_mysql_user
+MYSQL_DEST_PASSWORD=your_mysql_password
+MYSQL_DEST_DATABASE=your_mysql_database
+MYSQL_DEST_PORT=3306
+
 # 日志配置
 LOG_LEVEL=INFO
 ```
@@ -72,58 +79,63 @@ data-warehouse-migrate [OPTIONS]
 
 - `--source-project-id`: MaxCompute源项目ID
 - `--source-table-name`: MaxCompute源表名
-- `--destination-project-id`: BigQuery目标项目ID
-- `--destination-dataset-id`: BigQuery目标数据集ID
-- `--destination-table-name`: BigQuery目标表名
+- `--destination-table-name`: 目标表名
 
 #### 可选参数
 
+- `--destination-type`: 目标数据源类型，可选值：`bigquery` 或 `mysql`，默认为 `bigquery`
+- `--destination-project-id`: BigQuery目标项目ID (仅当destination-type为bigquery时需要)
+- `--destination-dataset-id`: BigQuery目标数据集ID (仅当destination-type为bigquery时需要)
 - `--mode`: 迁移模式，可选值：`overwrite`(覆盖) 或 `append`(追加)，默认为 `append`
 - `--batch-size`: 批次大小，默认为 `10000`
 - `--maxcompute-access-id`: MaxCompute AccessKey ID
 - `--maxcompute-secret-key`: MaxCompute AccessKey Secret
 - `--maxcompute-endpoint`: MaxCompute Endpoint
 - `--bigquery-credentials-path`: BigQuery服务账号凭证文件路径
+- `--mysql-dest-host`: MySQL目标主机
+- `--mysql-dest-user`: MySQL目标用户名
+- `--mysql-dest-password`: MySQL目标密码
+- `--mysql-dest-database`: MySQL目标数据库
+- `--mysql-dest-port`: MySQL目标端口
 - `--log-level`: 日志级别，可选值：`DEBUG`, `INFO`, `WARNING`, `ERROR`，默认为 `INFO`
 - `--dry-run`: 试运行模式，只检查连接和表结构，不实际迁移数据
 
 ### 使用示例
 
-#### 基本使用
+#### 从MaxCompute迁移到BigQuery
 
 ```bash
 data-warehouse-migrate \
   --source-project-id my-maxcompute-project \
   --source-table-name user_table \
+  --destination-type bigquery \
   --destination-project-id my-bigquery-project \
   --destination-dataset-id analytics \
   --destination-table-name users \
   --mode append
 ```
 
+#### 从MaxCompute迁移到MySQL
+
+```bash
+data-warehouse-migrate \
+  --source-project-id my-maxcompute-project \
+  --source-table-name orders \
+  --destination-type mysql \
+  --mysql-dest-host localhost \
+  --mysql-dest-user root \
+  --mysql-dest-password your_password \
+  --mysql-dest-database my_database \
+  --destination-table-name orders_from_maxcompute \
+  --mode overwrite
+```
+
 #### 试运行
 
 ```bash
-data-warehouse-migrate \
-  --source-project-id my-maxcompute-project \
-  --source-table-name user_table \
-  --destination-project-id my-bigquery-project \
-  --destination-dataset-id analytics \
-  --destination-table-name users \
-  --dry-run
+data-warehouse-migrate --dry-run [其他参数...]
 ```
 
-#### 覆盖模式
-
-```bash
-data-warehouse-migrate \
-  --source-project-id my-maxcompute-project \
-  --source-table-name user_table \
-  --destination-project-id my-bigquery-project \
-  --destination-dataset-id analytics \
-  --destination-table-name users \
-  --mode overwrite
-```
 
 ### Docker使用
 
@@ -155,6 +167,8 @@ docker-compose up
 
 ## 数据类型映射
 
+### MaxCompute -> BigQuery
+
 工具会自动处理MaxCompute和BigQuery之间的数据类型转换：
 
 | MaxCompute类型 | BigQuery类型 |
@@ -171,6 +185,23 @@ docker-compose up
 | array<T> | REPEATED T |
 | map<K,V> | RECORD |
 | struct | RECORD |
+
+### MaxCompute -> MySQL
+
+工具会自动处理MaxCompute和MySQL之间的数据类型转换：
+
+| MaxCompute类型 | MySQL类型 |
+|---------------|-------------|
+| bigint, int, smallint, tinyint | BIGINT |
+| double, float | DOUBLE |
+| decimal | DECIMAL(18, 4) |
+| string, varchar, char | VARCHAR(255) |
+| boolean | TINYINT(1) |
+| datetime | DATETIME |
+| timestamp | TIMESTAMP |
+| date | DATE |
+| binary | BLOB |
+| array<T>, map<K,V>, struct | TEXT (复杂类型可能需要手动调整) |
 
 ## 分区表处理
 
@@ -243,6 +274,7 @@ data-warehouse-migrate/
 │   ├── schema_mapper.py       # 数据类型映射
 │   ├── maxcompute_client.py   # MaxCompute客户端
 │   ├── bigquery_client.py     # BigQuery客户端
+│   ├── mysql_writer.py        # MySQL写入客户端
 │   └── migrator.py            # 核心迁移逻辑
 ├── tests/                     # 测试文件
 ├── Dockerfile                 # Docker配置

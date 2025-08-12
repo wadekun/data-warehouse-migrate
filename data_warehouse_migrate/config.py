@@ -35,6 +35,13 @@ class Config:
         # BigQuery配置
         self.bigquery_credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
         
+        # MySQL Destination Configuration
+        self.mysql_dest_host = os.getenv("MYSQL_DEST_HOST")
+        self.mysql_dest_user = os.getenv("MYSQL_DEST_USER")
+        self.mysql_dest_password = os.getenv("MYSQL_DEST_PASSWORD")
+        self.mysql_dest_database = os.getenv("MYSQL_DEST_DATABASE")
+        self.mysql_dest_port = int(os.getenv("MYSQL_DEST_PORT", 3306))
+        
         # 日志配置
         self.log_level = os.getenv('LOG_LEVEL', 'INFO')
         

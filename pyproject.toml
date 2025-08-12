@@ -13,6 +13,8 @@ dependencies = [
     "tqdm>=4.65.0",
     "python-dotenv>=1.0.0",
     "pandas-gbq>=0.26.1",
+    "mysql-connector-python>=8.0.0",
+    "sqlalchemy>=2.0.43",
 ]
 
 [project.scripts]

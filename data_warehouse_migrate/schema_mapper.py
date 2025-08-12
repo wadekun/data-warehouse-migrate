@@ -66,6 +66,48 @@ class SchemaMapper:
         return bigquery_fields
     
     @classmethod
+    def convert_maxcompute_to_mysql_schema(cls, maxcompute_columns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        将MaxCompute表结构转换为MySQL表结构
+        
+        Args:
+            maxcompute_columns: MaxCompute列信息列表
+            
+        Returns:
+            MySQL列信息列表
+        """
+        mysql_schema = []
+        for column in maxcompute_columns:
+            name = column['name']
+            maxcompute_type = column['type'].lower()
+            
+            mysql_type = ""
+            if maxcompute_type in ['bigint', 'int', 'smallint', 'tinyint']:
+                mysql_type = 'BIGINT'
+            elif maxcompute_type in ['double', 'float']:
+                mysql_type = 'DOUBLE'
+            elif maxcompute_type == 'decimal':
+                mysql_type = 'DECIMAL(18, 4)' # 示例精度，可根据需求调整
+            elif maxcompute_type in ['string', 'varchar', 'char']:
+                mysql_type = 'VARCHAR(255)' # 示例长度，可根据需求调整
+            elif maxcompute_type == 'boolean':
+                mysql_type = 'TINYINT(1)'
+            elif maxcompute_type == 'datetime':
+                mysql_type = 'DATETIME'
+            elif maxcompute_type == 'timestamp':
+                mysql_type = 'TIMESTAMP'
+            elif maxcompute_type == 'date':
+                mysql_type = 'DATE'
+            elif maxcompute_type == 'binary':
+                mysql_type = 'BLOB'
+            # 对于 ARRAY, MAP, STRUCT 等复杂类型，可能需要特殊处理或转换为 JSON 字符串
+            else:
+                mysql_type = 'TEXT' # 默认
+            
+            mysql_schema.append({'name': name, 'type': mysql_type})
+        return mysql_schema
+    
+    @classmethod
     def _convert_column(cls, column: Dict[str, Any]) -> bigquery.SchemaField:
         """
         转换单个列定义
