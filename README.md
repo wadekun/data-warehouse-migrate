@@ -221,6 +221,104 @@ data-warehouse-migrate -f conf.json
   - computed 仅支持白名单函数；不执行任意表达式
   - 未配置 mappings 时行为不变。
 
+#### computed: format 模板函数（统一格式拼接）
+
+- 作用：使用模板 + 格式化生成新列（仅 MySQL 映射路径）。支持零填充等常见格式需求。
+- 支持两种写法：
+  - 命名占位符（推荐）：
+
+    ```json
+    {
+      "computed": {
+        "year_week": { "func": "format", "args": ["{year}-{week:02d}"] }
+      }
+    }
+    ```
+
+  - 位置占位符：
+
+    ```json
+    {
+      "computed": {
+        "year_week": { "func": "format", "args": ["{}-{:02d}", "year", "week"] }
+      }
+    }
+    ```
+
+- 示例（year=2024, week=9/10/11 → 2024-09/2024-10/2024-11）：
+
+  ```json
+  {
+    "computed": {
+      "year_week": { "func": "format", "args": ["{year}-{week:02d}"] }
+    }
+  }
+  ```
+
+- 规则与说明：
+  - 命名占位符中的字段名使用“映射后的列名”（即在 rename/computed 后可见的列名）。
+  - 对数字格式（如 :02d），None/NaN/空字符串按 0 处理（week=None → 00）。
+  - 非数字格式的 None/NaN 作为空字符串处理。
+  - 若需先重命名再格式化，format 读取的应是重命名后的列名。
+  - 模板/参数错误不会中断迁移，该列将生成为空字符串，并在日志中输出 debug 信息。
+
+#### computed 可用函数一览
+
+以下函数仅在 MySQL 映射路径生效，均为白名单函数，按映射阶段的“计算列（computed）”顺序依次执行：
+
+- concat: 字符串拼接
+  - 说明：将参数依次拼接，参数可为列名或字符串字面量
+  - 示例：
+    ```json
+    { "computed": { "sku_full": { "func": "concat", "args": ["spu_code", "-", "size"] } } }
+    ```
+
+- upper: 转大写
+  - 说明：将指定列转为大写字符串
+  - 示例：
+    ```json
+    { "computed": { "sku_upper": { "func": "upper", "args": ["sku_code"] } } }
+    ```
+
+- lower: 转小写
+  - 说明：将指定列转为小写字符串
+  - 示例：
+    ```json
+    { "computed": { "sku_lower": { "func": "lower", "args": ["sku_code"] } } }
+    ```
+
+- substr: 子串
+  - 说明：从指定列的字符串取子串；参数为列名、起始下标（从0开始）、长度（可省略表示到末尾）
+  - 示例：
+    ```json
+    { "computed": { "sku_prefix": { "func": "substr", "args": ["sku_code", 0, 3] } } }
+    ```
+
+- now: 当前时间（UTC）
+  - 说明：生成当前 UTC 时间戳（pandas Timestamp），常用于补充时间列
+  - 示例：
+    ```json
+    { "computed": { "create_time": { "func": "now", "args": [] } } }
+    ```
+
+- format: 模板+格式化（推荐统一输出格式，支持零填充）
+  - 说明：见上节“computed: format 模板函数（统一格式拼接）”
+  - 命名占位符（推荐）：
+    ```json
+    { "computed": { "year_week": { "func": "format", "args": ["{year}-{week:02d}"] } } }
+    ```
+  - 位置占位符：
+    ```json
+    { "computed": { "year_week": { "func": "format", "args": ["{}-{:02d}", "year", "week"] } } }
+    ```
+
+注意：
+- computed 的键为“目标列名”；若与现有列重名，将覆盖该列（建议避免与 rename 目标重名）。
+- 计算顺序按配置文件中出现的先后依次执行；后续 computed 可以引用前面刚生成的列。
+- 对 None/NaN 的处理：
+  - concat/upper/lower/substr：内部会将列转为字符串；None/NaN 结果通常为空字符串（或依赖 pandas 的转换规则）
+  - format：若使用数字格式（如 :02d），None/NaN 会被当作 0 处理；非数字格式当作空字符串处理
+
 
 ### Docker使用
 

@@ -3,6 +3,7 @@
 """
 
 from typing import Optional, List, Dict, Any
+import string
 from enum import Enum
 from tqdm import tqdm
 import pandas as pd
@@ -783,8 +784,41 @@ class DataMigrator:
         for dst, spec in computed.items():
             if isinstance(spec, dict):
                 func = str(spec.get('func', '')).lower()
-                if func not in {'concat', 'upper', 'lower', 'substr', 'now'}:
+                if func not in {'concat', 'upper', 'lower', 'substr', 'now', 'format'}:
                     raise DataMigrationError(f"computed 不支持的函数: {func}")
+                # format 特殊校验
+                if func == 'format':
+                    args = spec.get('args') or []
+                    if not args or not isinstance(args[0], str):
+                        raise DataMigrationError("format 需要以模板字符串为第一个参数")
+                    template = str(args[0])
+                    # 构建可用列集合（源列、rename 目标、computed 目标）
+                    available_cols = set(source_names)
+                    available_cols.update({str(v).lower() for v in rename.values()})
+                    available_cols.update({str(k).lower() for k in computed.keys()})
+                    # 命名占位符: 仅一个参数
+                    if len(args) == 1:
+                        try:
+                            needed = set()
+                            for lit, field_name, fmt, conv in string.Formatter().parse(template):
+                                if field_name is not None and field_name != '':
+                                    needed.add(str(field_name).lower())
+                            # 校验存在性（允许纯字面量模板）
+                            for name in needed:
+                                if name not in available_cols:
+                                    raise DataMigrationError(f"format 模板引用了不存在的列: {name}")
+                        except ValueError:
+                            raise DataMigrationError("format 模板解析失败，请检查花括号匹配")
+                    else:
+                        # 位置占位符: args[1:] 为列名或字面量
+                        for a in args[1:]:
+                            if isinstance(a, str):
+                                # 若作为列名存在则校验，否则视为字面量
+                                if a.lower() in available_cols:
+                                    continue
+                                # 不是列名则认为是字面量，跳过
+                            # 非字符串参数视为字面量
+                            continue
             else:
                 raise DataMigrationError("computed 需使用 JSON 对象形式 {func, args}")
 
@@ -869,6 +903,76 @@ class DataMigrator:
             length = int(args[2]) if len(args) > 2 else None
             s = df[col].astype(str)
             return s.str.slice(start, start + length if length is not None else None)
+        if func == 'format':
+            # 支持两种形式：
+            # 1) 命名占位符: args = ["{year}-{week:02d}"]
+            # 2) 位置占位符: args = ["{}-{:02d}", "year", "week"]
+            if not args or not isinstance(args[0], str):
+                return pd.Series([None] * len(df), index=df.index)
+            template = str(args[0])
+            formatter = string.Formatter()
+            # 解析模板以识别占位符顺序与 numeric d 格式
+            fields = []  # List[Tuple[field_name, format_spec]]; field_name may be '' for positional
+            try:
+                for lit, field_name, fmt, conv in formatter.parse(template):
+                    if field_name is not None:
+                        fields.append((str(field_name), str(fmt or '')))
+            except ValueError:
+                return pd.Series([None] * len(df), index=df.index)
+
+            def coerce_value(val, fmt_spec: str):
+                # None/NaN 处理：数字 d 用 0；否则空字符串
+                is_nan = val is None or (isinstance(val, float) and np.isnan(val))
+                if 'd' in fmt_spec:  # 期望整数
+                    if is_nan or (isinstance(val, str) and val.strip() == ''):
+                        return 0
+                    try:
+                        return int(val)
+                    except Exception:
+                        return 0
+                else:
+                    if is_nan:
+                        return ''
+                    return val
+
+            if len(args) == 1:
+                # 命名占位符
+                def fmt_row(row):
+                    data = {}
+                    for fname, fmt_spec in fields:
+                        if fname == '':
+                            # 位置占位符在命名模式中忽略
+                            continue
+                        v = row.get(fname, None)
+                        data[fname] = coerce_value(v, fmt_spec)
+                    try:
+                        return template.format(**data)
+                    except Exception:
+                        return ''
+                return df.apply(lambda r: fmt_row(r), axis=1)
+            else:
+                # 位置占位符
+                sources = args[1:]
+                # 预先解析每个位置是否 d 格式
+                numeric_flags = []
+                for fname, fmt_spec in fields:
+                    numeric_flags.append('d' in fmt_spec)
+                def fmt_row(row):
+                    vals = []
+                    for i, src in enumerate(sources):
+                        if isinstance(src, str) and src in row.index:
+                            v = row[src]
+                        else:
+                            v = src  # 字面量
+                        fmt_spec = ''
+                        if i < len(numeric_flags) and numeric_flags[i]:
+                            fmt_spec = 'd'
+                        vals.append(coerce_value(v, fmt_spec))
+                    try:
+                        return template.format(*vals)
+                    except Exception:
+                        return ''
+                return df.apply(lambda r: fmt_row(r), axis=1)
         # 未知函数返回空列
         return None
 
