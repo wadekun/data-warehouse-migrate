@@ -9,6 +9,7 @@ from typing import Optional
 from .migrator import DataMigrator, MigrationMode
 from .config import config
 from .exceptions import DataWarehouseMigrateError, ConfigurationError
+from .config_loader import load_config_file, normalize_config, merge_with_cli_and_env
 from .logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -16,30 +17,27 @@ logger = setup_logger(__name__)
 
 @click.command()
 @click.option('--source-project-id', 
-              required=True,
-              help='MaxCompute源项目ID')
+              help='MaxCompute源项目ID（可在配置文件中提供）')
 @click.option('--source-table-name', 
-              required=True,
-              help='MaxCompute源表名')
+              help='MaxCompute源表名（可在配置文件中提供）')
 @click.option('--destination-type',
               type=click.Choice(['bigquery', 'mysql'], case_sensitive=False),
-              default='bigquery',
-              help='目标数据源类型: bigquery 或 mysql')
+              default=None,
+              help='目标数据源类型: bigquery 或 mysql（可在配置文件中提供）')
 @click.option('--destination-project-id', 
               help='BigQuery目标项目ID (仅当destination-type为bigquery时需要)')
 @click.option('--destination-dataset-id', 
               help='BigQuery目标数据集ID (仅当destination-type为bigquery时需要)')
 @click.option('--destination-table-name', 
-              required=True,
-              help='目标表名')
+              help='目标表名（可在配置文件中提供）')
 @click.option('--mode', 
               type=click.Choice(['overwrite', 'append'], case_sensitive=False),
-              default='append',
-              help='迁移模式: overwrite(覆盖) 或 append(追加)，默认为append')
+              default=None,
+              help='迁移模式: overwrite(覆盖) 或 append(追加)（可在配置文件中提供）')
 @click.option('--batch-size',
               type=int,
-              default=10000,
-              help='批次大小，默认为10000')
+              default=None,
+              help='批次大小（可在配置文件中提供）')
 @click.option('--maxcompute-access-id',
               help='MaxCompute AccessKey ID (可通过环境变量MAXCOMPUTE_ACCESS_ID设置)')
 @click.option('--maxcompute-secret-key',
@@ -61,8 +59,8 @@ logger = setup_logger(__name__)
               help='MySQL目标端口 (可通过环境变量MYSQL_DEST_PORT设置)')
 @click.option('--log-level',
               type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR'], case_sensitive=False),
-              default='INFO',
-              help='日志级别，默认为INFO')
+              default=None,
+              help='日志级别（可在配置文件中提供）')
 @click.option('--preserve-string-null-tokens/--no-preserve-string-null-tokens',
               default=None,
               help='是否在字符串列中保留字面量空值标记（NULL/None/NaN等）。默认取环境变量配置，未设置时为保留')
@@ -79,6 +77,9 @@ logger = setup_logger(__name__)
 @click.option('--dry-run',
               is_flag=True,
               help='试运行模式，只检查连接和表结构，不实际迁移数据')
+@click.option('-f', '--config-file',
+              default=None,
+              help='配置文件路径（JSON），CLI > 文件 > 环境 进行合并')
 def main(source_project_id: str,
          source_table_name: str,
          destination_type: str,
@@ -101,18 +102,80 @@ def main(source_project_id: str,
          null_on_non_nullable: Optional[str],
          null_fill_sentinel: Optional[str],
          log_level: str,
-         dry_run: bool):
+         dry_run: bool,
+         config_file: Optional[str]):
     """
     数据仓库迁移工具
     
     支持从阿里云MaxCompute迁移数据到Google Cloud BigQuery
     """
     
-    # 设置日志级别
-    logger.setLevel(getattr(__import__('logging'), log_level.upper()))
+    # 初始日志级别（可能为None）；最终会在参数合并后再次设置
+    if log_level:
+        logger.setLevel(getattr(__import__('logging'), str(log_level).upper()))
     
     try:
-        # 显示配置信息
+        # 1) 从配置文件读取并规范化
+        file_cfg = {}
+        if config_file:
+            file_cfg = normalize_config(load_config_file(config_file))
+
+        # 2) 将 CLI 实参打包为 dict 参与合并
+        cli_args = {
+            "source_project_id": source_project_id,
+            "source_table_name": source_table_name,
+            "destination_type": destination_type,
+            "destination_project_id": destination_project_id,
+            "destination_dataset_id": destination_dataset_id,
+            "destination_table_name": destination_table_name,
+            "mode": mode,
+            "batch_size": batch_size,
+            "maxcompute_access_id": maxcompute_access_id,
+            "maxcompute_secret_key": maxcompute_secret_key,
+            "maxcompute_endpoint": maxcompute_endpoint,
+            "bigquery_credentials_path": bigquery_credentials_path,
+            "mysql_dest_host": mysql_dest_host,
+            "mysql_dest_user": mysql_dest_user,
+            "mysql_dest_password": mysql_dest_password,
+            "mysql_dest_database": mysql_dest_database,
+            "mysql_dest_port": mysql_dest_port,
+            "preserve_string_null_tokens": preserve_string_null_tokens,
+            "string_null_tokens": string_null_tokens,
+            "null_on_non_nullable": null_on_non_nullable,
+            "null_fill_sentinel": null_fill_sentinel,
+            "log_level": log_level,
+            "dry_run": dry_run,
+        }
+
+        # 3) 合并：CLI > 文件 > 环境
+        final_args = merge_with_cli_and_env(cli_args, file_cfg, config)
+
+        # 将关键生效参数回写到局部变量，便于后续沿用
+        source_project_id = final_args.get("source_project_id")
+        source_table_name = final_args.get("source_table_name")
+        destination_type = (final_args.get("destination_type") or "").lower() or "bigquery"
+        destination_project_id = final_args.get("destination_project_id")
+        destination_dataset_id = final_args.get("destination_dataset_id")
+        destination_table_name = final_args.get("destination_table_name")
+        mode = final_args.get("mode", "append")
+        batch_size = final_args.get("batch_size", 10000)
+        maxcompute_access_id = final_args.get("maxcompute_access_id")
+        maxcompute_secret_key = final_args.get("maxcompute_secret_key")
+        maxcompute_endpoint = final_args.get("maxcompute_endpoint")
+        bigquery_credentials_path = final_args.get("bigquery_credentials_path")
+        mysql_dest_host = final_args.get("mysql_dest_host")
+        mysql_dest_user = final_args.get("mysql_dest_user")
+        mysql_dest_password = final_args.get("mysql_dest_password")
+        mysql_dest_database = final_args.get("mysql_dest_database")
+        mysql_dest_port = final_args.get("mysql_dest_port")
+        preserve_tokens = final_args.get("preserve_string_null_tokens", config.preserve_string_null_tokens)
+        tokens = final_args.get("string_null_tokens", config.string_null_tokens)
+        null_policy = final_args.get("null_on_non_nullable", config.null_on_non_nullable)
+        null_sentinel = final_args.get("null_fill_sentinel", config.null_fill_sentinel)
+        log_level = final_args.get("log_level", log_level)
+        dry_run = final_args.get("dry_run", dry_run)
+
+        # 使用最终参数打印信息
         click.echo("=" * 60)
         click.echo("数据仓库迁移工具")
         click.echo("=" * 60)
@@ -132,8 +195,11 @@ def main(source_project_id: str,
         if dry_run:
             click.echo("模式: 试运行 (不会实际迁移数据)")
         click.echo("=" * 60)
-        
-        # 验证配置
+
+        # 以最终日志级别更新logger等级
+        logger.setLevel(getattr(__import__('logging'), str(log_level).upper()))
+
+        # 终态参数校验
         _validate_configuration(
             destination_type,
             maxcompute_access_id,
@@ -146,19 +212,6 @@ def main(source_project_id: str,
             mysql_dest_database,
             mysql_dest_port
         )
-        
-        # 解析字符串空值与非空策略参数（优先CLI，其次环境配置）
-        preserve_tokens = (
-            preserve_string_null_tokens
-            if preserve_string_null_tokens is not None
-            else config.preserve_string_null_tokens
-        )
-        tokens = (
-            [tok.strip() for tok in string_null_tokens.split(',')] if string_null_tokens
-            else config.string_null_tokens
-        )
-        null_policy = (null_on_non_nullable or config.null_on_non_nullable).lower()
-        null_sentinel = null_fill_sentinel if null_fill_sentinel is not None else config.null_fill_sentinel
 
         # 创建迁移器
         migrator = DataMigrator(

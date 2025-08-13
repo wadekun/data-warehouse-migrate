@@ -67,3 +67,6 @@ pip-delete-this-directory.txt
 # BigQuery/Google credentials
 *.json
 !examples/*.json
+
+# local_conf
+local_conf/
