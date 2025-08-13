@@ -136,6 +136,91 @@ data-warehouse-migrate \
 data-warehouse-migrate --dry-run [其他参数...]
 ```
 
+### 配置文件支持
+
+- 支持通过配置文件加载迁移参数，命令行示例：
+
+```bash
+data-warehouse-migrate -f conf.json
+```
+
+- 参数优先级：命令行 > 配置文件 > 环境变量。
+- 配置文件（JSON）示例（扁平键与 CLI 一致）：
+
+```json
+{
+  "source_project_id": "bybest",
+  "source_table_name": "ods_lm_spu",
+  "destination_type": "mysql",
+  "mysql_dest_host": "127.0.0.1",
+  "mysql_dest_port": 3306,
+  "mysql_dest_user": "root",
+  "mysql_dest_password": "${MYSQL_PASSWORD}",
+  "mysql_dest_database": "supplychain_system",
+  "destination_table_name": "lm_spu",
+  "mode": "overwrite",
+  "batch_size": 100000,
+  "log_level": "INFO",
+  "dry_run": false,
+  "preserve_string_null_tokens": true,
+  "string_null_tokens": ["nan","None","null","<NA>","NaN"],
+  "null_on_non_nullable": "fail",
+  "null_fill_sentinel": ""
+}
+```
+
+- 也支持分组键写法（会自动规范化为扁平键）：
+
+```json
+{
+  "source": {"project_id": "bybest", "table_name": "ods_lm_spu"},
+  "destination": {
+    "type": "mysql",
+    "table_name": "lm_spu",
+    "mysql": {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "${MYSQL_PASSWORD}", "database": "supplychain_system"}
+  },
+  "run": {"mode": "overwrite", "batch_size": 100000, "log_level": "INFO", "dry_run": false},
+  "compat": {"preserve_string_null_tokens": true, "string_null_tokens": ["nan","None","null","<NA>","NaN"], "null_on_non_nullable": "fail", "null_fill_sentinel": ""}
+}
+```
+
+### 字段映射（仅 MySQL）
+
+- 仅当 `destination_type` 为 `mysql` 时启用映射；BigQuery 默认忽略该配置（为未来扩展预留）。
+- 支持能力：
+  - include/exclude：列选择
+  - rename：列重命名（源→目标，大小写不敏感）
+  - type_override：覆盖目标列类型（MySQL 类型字面量）
+  - defaults：写入前 DataFrame 层默认值填充
+  - computed：派生列（白名单函数：concat/upper/lower/substr/NOW）
+  - order：最终输出列顺序
+
+- 配置文件示例中的 `mappings` 段：
+
+```json
+{
+  "mappings": {
+    "default": {
+      "exclude": ["pt"],
+      "rename": {"sku_code": "sku"},
+      "type_override": {"sku": "VARCHAR(64)"},
+      "defaults": {"deleted": "b'0'"},
+      "computed": {"skc_code": {"func": "concat", "args": ["spu_code", "-", "size"]}},
+      "order": ["id", "sku", "skc_code", "deleted", "create_time"]
+    },
+    "tables": [
+      {"source_table": "ods_lm_spu", "exclude": ["pt"], "rename": {"sku_sabc": "sku_grade"}, "type_override": {"sku_grade": "VARCHAR(8)"}}
+    ]
+  }
+}
+```
+
+- 应用顺序：类型应用后 → 列选择 → 重命名 → 计算列 → 应用层默认值 → 按顺序重排 → 数据库默认值/非空校验 → 写入。
+- 校验：
+  - 源列必须存在；重命名后的目标列不可重复
+  - computed 仅支持白名单函数；不执行任意表达式
+  - 未配置 mappings 时行为不变。
+
 
 ### Docker使用
 

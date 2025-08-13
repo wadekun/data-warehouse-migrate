@@ -9,7 +9,7 @@ from typing import Optional
 from .migrator import DataMigrator, MigrationMode
 from .config import config
 from .exceptions import DataWarehouseMigrateError, ConfigurationError
-from .config_loader import load_config_file, normalize_config, merge_with_cli_and_env
+from .config_loader import load_config_file, normalize_config, merge_with_cli_and_env, select_table_mapping
 from .logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -175,6 +175,13 @@ def main(source_project_id: str,
         log_level = final_args.get("log_level", log_level)
         dry_run = final_args.get("dry_run", dry_run)
 
+        # 选择字段映射（仅 MySQL 的一期生效）
+        active_mapping = None
+        if destination_type == 'mysql' and config_file:
+            # 直接从原始文件加载（未扁平化）以读取 mappings 段
+            raw_cfg = load_config_file(config_file)
+            active_mapping = select_table_mapping(raw_cfg, source_table_name)
+
         # 使用最终参数打印信息
         click.echo("=" * 60)
         click.echo("数据仓库迁移工具")
@@ -230,7 +237,8 @@ def main(source_project_id: str,
             preserve_string_null_tokens=preserve_tokens,
             string_null_tokens=tokens,
             null_on_non_nullable=null_policy,
-            null_fill_sentinel=null_sentinel
+            null_fill_sentinel=null_sentinel,
+            column_mapping_plan=active_mapping if destination_type == 'mysql' else None
         )
         
         # 转换迁移模式
@@ -374,6 +382,34 @@ def _dry_run(migrator: DataMigrator,
         click.echo("   ✓ 目标表已存在")
     else:
         click.echo("   ✓ 目标表不存在，迁移时将创建")
+
+    # 6. 映射摘要（仅 MySQL 且存在映射）
+    if migrator.destination_type == 'mysql' and getattr(migrator, 'column_mapping_plan', None):
+        try:
+            summary = migrator.generate_mysql_mapping_summary(columns)
+            if summary:
+                click.echo("6. 映射摘要（MySQL）...")
+                if summary.get('include'):
+                    click.echo(f"   include: {', '.join(summary['include'])}")
+                if summary.get('exclude'):
+                    click.echo(f"   exclude: {', '.join(summary['exclude'])}")
+                if summary.get('rename'):
+                    pairs = [f"{k} -> {v}" for k, v in summary['rename'].items()]
+                    click.echo(f"   rename: {', '.join(pairs)}")
+                if summary.get('computed'):
+                    click.echo(f"   computed: {', '.join(summary['computed'])}")
+                if summary.get('type_override'):
+                    pairs = [f"{k}: {v}" for k, v in summary['type_override'].items()]
+                    click.echo(f"   type_override: {', '.join(pairs)}")
+                if summary.get('order'):
+                    click.echo(f"   order: {', '.join(summary['order'])}")
+                click.echo(f"   最终目标列数: {summary.get('final_count')}")
+                finals = summary.get('final_columns') or []
+                if finals:
+                    preview = finals if len(finals) <= 30 else finals[:30] + ['...']
+                    click.echo(f"   最终目标列: {', '.join(preview)}")
+        except Exception as e:
+            logger.debug(f"dry-run 映射摘要输出失败: {e}")
 
 
 if __name__ == '__main__':

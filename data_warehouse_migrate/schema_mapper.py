@@ -66,7 +66,7 @@ class SchemaMapper:
         return bigquery_fields
     
     @classmethod
-    def convert_maxcompute_to_mysql_schema(cls, maxcompute_columns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def convert_maxcompute_to_mysql_schema(cls, maxcompute_columns: List[Dict[str, Any]], overrides: Dict[str, str] | None = None) -> List[Dict[str, Any]]:
         """
         将MaxCompute表结构转换为MySQL表结构
         
@@ -118,6 +118,14 @@ class SchemaMapper:
 
             mysql_schema.append({'name': name, 'type': mysql_type})
             seen_lower_names.add(name_lower)
+
+        # 应用类型覆盖（按目标列名大小写不敏感）
+        if overrides and isinstance(overrides, dict):
+            lower_override = {str(k).lower(): v for k, v in overrides.items()}
+            for col in mysql_schema:
+                lname = col['name'].lower()
+                if lname in lower_override and lower_override[lname]:
+                    col['type'] = lower_override[lname]
 
         return mysql_schema
     

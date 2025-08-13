@@ -44,7 +44,8 @@ class DataMigrator:
                  preserve_string_null_tokens: bool = True,
                  string_null_tokens: Optional[List[str]] = None,
                  null_on_non_nullable: str = 'fail',
-                 null_fill_sentinel: Optional[str] = None):
+                 null_fill_sentinel: Optional[str] = None,
+                 column_mapping_plan: Optional[Dict[str, Any]] = None):
         """
         初始化数据迁移器
         
@@ -94,6 +95,7 @@ class DataMigrator:
         self.string_null_tokens = string_null_tokens or ['nan', 'None', 'null', '<NA>', 'NaN']
         self.null_on_non_nullable = (null_on_non_nullable or 'fail').lower()
         self.null_fill_sentinel = null_fill_sentinel
+        self.column_mapping_plan = column_mapping_plan if column_mapping_plan else None
 
     def _create_destination_client(self, destination_type: str, **kwargs):
         if destination_type == 'mysql':
@@ -236,9 +238,18 @@ class DataMigrator:
                     maxcompute_columns
                 )
             elif self.destination_type == 'mysql':
-                destination_schema = self.schema_mapper.convert_maxcompute_to_mysql_schema(
-                    maxcompute_columns
-                )
+                # 应用字段映射计划（仅 MySQL 一期）
+                if self.column_mapping_plan:
+                    self._validate_mapping_mysql(self.column_mapping_plan, maxcompute_columns)
+                    prepared_columns, overrides, _ = self._prepare_mysql_schema_inputs(maxcompute_columns, self.column_mapping_plan)
+                    destination_schema = self.schema_mapper.convert_maxcompute_to_mysql_schema(
+                        prepared_columns,
+                        overrides=overrides
+                    )
+                else:
+                    destination_schema = self.schema_mapper.convert_maxcompute_to_mysql_schema(
+                        maxcompute_columns
+                    )
                 # 兜底去重，避免重复列（大小写不敏感）
                 destination_schema = self._dedupe_mysql_schema(destination_schema)
             else:
@@ -272,29 +283,6 @@ class DataMigrator:
 
         # Get source schema (already available)
         maxcompute_columns = self.maxcompute_client.get_table_schema(source_table_name)
-        maxcompute_column_names = {col['name'].lower() for col in maxcompute_columns if not col.get('is_partition', False)}
-
-        # Get destination schema
-        destination_columns = []
-        if self.destination_type == 'mysql':
-            destination_columns = self.destination_client.get_table_schema(destination_table_name)
-        # Add BigQuery schema retrieval if needed for future comparison, but for now, focus on MySQL
-        # elif self.destination_type == 'bigquery':
-        #     destination_columns = self.bigquery_client.get_table_schema(destination_dataset_id, destination_table_name)
-
-        destination_column_names = {col['name'].lower() for col in destination_columns}
-
-        # Compare schemas and find common columns
-        common_columns = list(maxcompute_column_names.intersection(destination_column_names))
-        
-        # Identify discrepancies
-        source_only_columns = maxcompute_column_names.difference(destination_column_names)
-        destination_only_columns = destination_column_names.difference(maxcompute_column_names)
-
-        if source_only_columns:
-            logger.warning(f"源表 {source_table_name} 包含目标表 {destination_table_name} 中不存在的字段: {', '.join(source_only_columns)}")
-        if destination_only_columns:
-            logger.warning(f"目标表 {destination_table_name} 包含源表 {source_table_name} 中不存在的字段: {', '.join(destination_only_columns)}")
 
         batch_count = 0
         total_rows = 0
@@ -312,16 +300,14 @@ class DataMigrator:
                 
                 logger.debug(f"处理第 {batch_count} 批数据，行数: {batch_rows}")
 
-                # Filter DataFrame to only include common columns
-                # Ensure column names are lowercased for comparison
-                df_columns_lower = {col.lower(): col for col in batch_df.columns}
-                filtered_columns = [df_columns_lower[col_name] for col_name in common_columns if col_name in df_columns_lower]
-                
-                # Only select columns that are in both source and target
-                typed_df = self._apply_source_schema_types(batch_df[filtered_columns], source_table_name)
+                # 先按源表结构进行类型应用（不裁剪列，避免映射前丢列）
+                typed_df = self._apply_source_schema_types(batch_df, source_table_name)
 
                 # Apply MySQL defaults for non-nullable columns if destination is MySQL
                 if self.destination_type == 'mysql':
+                    # 应用映射的数据变换（选择/重命名/计算/默认/排序）
+                    if self.column_mapping_plan:
+                        typed_df = self._transform_dataframe_by_mapping_mysql(typed_df, self.column_mapping_plan)
                     # Get destination schema (full info including nullability and defaults)
                     # Cache this to avoid repeated calls
                     if destination_table_name not in self._destination_schema_cache:
@@ -329,6 +315,13 @@ class DataMigrator:
                         self._destination_schema_cache[destination_table_name] = full_destination_schema
                     else:
                         full_destination_schema = self._destination_schema_cache[destination_table_name]
+
+                    # 依据目标表列集合过滤并按表顺序重排
+                    dest_cols_order = [c['name'] for c in full_destination_schema]
+                    dest_cols_lower = {c.lower() for c in dest_cols_order}
+                    keep_cols = [c for c in typed_df.columns if c.lower() in dest_cols_lower]
+                    typed_df = typed_df[keep_cols]
+                    typed_df = typed_df[[c for c in dest_cols_order if c in typed_df.columns]]
 
                     # 先应用默认值（若列非空且存在默认值）
                     typed_df = self._apply_mysql_defaults(typed_df, full_destination_schema)
@@ -683,5 +676,234 @@ class DataMigrator:
         if rows_after != rows_before:
             logger.info(f"写入前校验处理完成：行数 {rows_before} -> {rows_after}")
         return working_df
+
+    def _prepare_mysql_schema_inputs(self, source_columns: List[Dict[str, Any]], mapping: Dict[str, Any]):
+        """
+        基于映射构建用于生成 MySQL 目标表结构的列定义：
+        - 过滤分区列
+        - include/exclude 选择
+        - rename 应用到列名
+        - 追加 computed 列（默认 string，可被 overrides 覆盖）
+        - 按 order 排列
+        返回: (prepared_columns, overrides_by_target_name, final_target_names)
+        """
+        # 取非分区源列
+        base_cols = [
+            {"name": c['name'], "type": c['type'], "is_partition": False}
+            for c in source_columns if not c.get('is_partition', False)
+        ]
+        include = mapping.get('include') or []
+        exclude = mapping.get('exclude') or []
+        rename = mapping.get('rename') or {}
+        type_override = mapping.get('type_override') or {}
+        computed = mapping.get('computed') or {}
+        order = mapping.get('order') or []
+
+        lower_name_to_col = {c['name'].lower(): c for c in base_cols}
+
+        # include / exclude
+        if include:
+            selected = [lower_name_to_col[n.lower()] for n in include if n.lower() in lower_name_to_col]
+        else:
+            selected = list(base_cols)
+        if exclude:
+            selected = [c for c in selected if c['name'].lower() not in {n.lower() for n in exclude}]
+
+        # rename 应用到列定义
+        prepared: List[Dict[str, Any]] = []
+        for c in selected:
+            # 支持大小写不敏感的 rename 键
+            new_name = None
+            if c['name'] in rename:
+                new_name = rename[c['name']]
+            else:
+                for k, v in rename.items():
+                    if str(k).lower() == c['name'].lower():
+                        new_name = v
+                        break
+            if new_name:
+                prepared.append({"name": str(new_name), "type": c['type'], "is_partition": False})
+            else:
+                prepared.append({"name": c['name'], "type": c['type'], "is_partition": False})
+
+        # 追加 computed 列（默认 string）
+        for comp_name in (computed.keys() if isinstance(computed, dict) else []):
+            if not any(col['name'].lower() == str(comp_name).lower() for col in prepared):
+                prepared.append({"name": str(comp_name), "type": "string", "is_partition": False})
+
+        # 按 order 排列
+        if order:
+            order_lower = [str(n).lower() for n in order]
+            ordered = [col for name in order_lower for col in prepared if col['name'].lower() == name]
+            remaining = [col for col in prepared if col['name'].lower() not in order_lower]
+            prepared = ordered + remaining
+
+        # overrides（按目标列名）
+        overrides: Dict[str, str] = {}
+        if isinstance(type_override, dict):
+            for k, v in type_override.items():
+                overrides[str(k)] = v
+
+        final_names = [c['name'] for c in prepared]
+        return prepared, overrides, final_names
+
+    # ---------- 映射：仅 MySQL 一期 ----------
+    def _validate_mapping_mysql(self, mapping: Dict[str, Any], source_columns: List[Dict[str, Any]]) -> None:
+        """
+        校验 include/exclude/rename/type_override/computed 是否可用。
+        仅进行基础校验：源列存在、目标列不重复、函数白名单。
+        """
+        source_names = {c['name'].lower() for c in source_columns if not c.get('is_partition', False)}
+        include = mapping.get('include') or []
+        exclude = mapping.get('exclude') or []
+        rename = mapping.get('rename') or {}
+        type_override = mapping.get('type_override') or {}
+        computed = mapping.get('computed') or {}
+        order = mapping.get('order') or []
+
+        # include/exclude 列存在性（大小写不敏感）
+        for col in include:
+            if col.lower() not in source_names:
+                raise DataMigrationError(f"映射 include 的列不存在于源表: {col}")
+        for col in exclude:
+            # 可允许排除不存在列，不报错
+            pass
+
+        # rename: 源列必须存在；目标列不能重复
+        target_names = set()
+        for src, dst in rename.items():
+            if src.lower() not in source_names:
+                raise DataMigrationError(f"映射 rename 的源列不存在: {src}")
+            dst_lower = str(dst).lower()
+            if dst_lower in target_names:
+                raise DataMigrationError(f"映射 rename 产生重复目标列: {dst}")
+            target_names.add(dst_lower)
+
+        # computed 函数白名单
+        for dst, spec in computed.items():
+            if isinstance(spec, dict):
+                func = str(spec.get('func', '')).lower()
+                if func not in {'concat', 'upper', 'lower', 'substr', 'now'}:
+                    raise DataMigrationError(f"computed 不支持的函数: {func}")
+            else:
+                raise DataMigrationError("computed 需使用 JSON 对象形式 {func, args}")
+
+        # order 不做严格校验，运行时按存在列重排
+
+    def _transform_dataframe_by_mapping_mysql(self, df: pd.DataFrame, mapping: Dict[str, Any]) -> pd.DataFrame:
+        transformed = df.copy()
+
+        include = mapping.get('include') or []
+        exclude = mapping.get('exclude') or []
+        rename = mapping.get('rename') or {}
+        defaults = mapping.get('defaults') or {}
+        computed = mapping.get('computed') or {}
+        order = mapping.get('order') or []
+
+        # include / exclude
+        src_cols_lower = {c.lower(): c for c in transformed.columns}
+        if include:
+            cols = [src_cols_lower[c.lower()] for c in include if c.lower() in src_cols_lower]
+            transformed = transformed[cols]
+        if exclude:
+            drop_cols = [src_cols_lower[c.lower()] for c in exclude if c.lower() in src_cols_lower]
+            transformed = transformed.drop(columns=[c for c in drop_cols if c in transformed.columns])
+
+        # rename（大小写不敏感）
+        rename_map = {}
+        for src, dst in rename.items():
+            if src.lower() in src_cols_lower:
+                rename_map[src_cols_lower[src.lower()]] = dst
+        if rename_map:
+            transformed = transformed.rename(columns=rename_map)
+
+        # computed
+        for dst, spec in computed.items():
+            if not isinstance(spec, dict):
+                continue
+            func = str(spec.get('func', '')).lower()
+            args = spec.get('args') or []
+            transformed[dst] = self._evaluate_computed(transformed, func, args)
+
+        # defaults（应用层）
+        for col, val in defaults.items():
+            if col in transformed.columns:
+                transformed[col] = transformed[col].fillna(val)
+
+        # order：仅对存在列生效，缺失的忽略
+        if order:
+            ordered = [c for c in order if c in transformed.columns]
+            remaining = [c for c in transformed.columns if c not in ordered]
+            transformed = transformed[ordered + remaining]
+
+        return transformed
+
+    def _evaluate_computed(self, df: pd.DataFrame, func: str, args: List[Any]):
+        func = (func or '').lower()
+        if func == 'now':
+            return pd.Timestamp.utcnow()
+        if func == 'concat':
+            # 字符串连接，支持字面量
+            series_list: List[pd.Series] = []
+            for a in args:
+                if isinstance(a, str) and a in df.columns:
+                    series_list.append(df[a].astype(str))
+                else:
+                    lit = pd.Series([str(a)] * len(df), index=df.index)
+                    series_list.append(lit)
+            if not series_list:
+                return pd.Series([""] * len(df), index=df.index)
+            out = series_list[0]
+            for s in series_list[1:]:
+                out = out + s
+            return out
+        if func == 'upper':
+            col = args[0]
+            return df[col].astype(str).str.upper()
+        if func == 'lower':
+            col = args[0]
+            return df[col].astype(str).str.lower()
+        if func == 'substr':
+            col = args[0]
+            start = int(args[1]) if len(args) > 1 else 0
+            length = int(args[2]) if len(args) > 2 else None
+            s = df[col].astype(str)
+            return s.str.slice(start, start + length if length is not None else None)
+        # 未知函数返回空列
+        return None
+
+    def generate_mysql_mapping_summary(self, source_columns: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """
+        生成 MySQL 映射摘要（仅在存在映射计划时返回）。
+        返回包含 include/exclude/rename/computed/type_override/order 以及最终列名与数量的字典。
+        """
+        if self.destination_type != 'mysql' or not self.column_mapping_plan:
+            return None
+        try:
+            # 校验并准备
+            self._validate_mapping_mysql(self.column_mapping_plan, source_columns)
+            prepared_cols, overrides, final_names = self._prepare_mysql_schema_inputs(source_columns, self.column_mapping_plan)
+
+            mapping = self.column_mapping_plan
+            include = mapping.get('include') or []
+            exclude = mapping.get('exclude') or []
+            rename = mapping.get('rename') or {}
+            computed = list((mapping.get('computed') or {}).keys())
+            type_override = overrides or {}
+            order = mapping.get('order') or []
+
+            return {
+                'include': include,
+                'exclude': exclude,
+                'rename': rename,
+                'computed': computed,
+                'type_override': type_override,
+                'order': order,
+                'final_columns': final_names,
+                'final_count': len(final_names),
+            }
+        except Exception as e:
+            logger.debug(f"生成映射摘要失败: {e}")
+            return None
 
     

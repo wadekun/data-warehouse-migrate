@@ -248,3 +248,44 @@ def merge_with_cli_and_env(cli_args: Dict[str, Any], file_cfg: Dict[str, Any], e
     return merged
 
 
+def select_table_mapping(raw_cfg: Dict[str, Any], source_table_name: str | None) -> Dict[str, Any] | None:
+    """
+    从原始配置中选择映射规则（仅返回原始映射片段，合并 default 和表级）。
+    若不存在 mappings 段，返回 None。
+    合并规则：default 作为基，若表级匹配 source_table_name 则覆盖对应键。
+    """
+    mappings = raw_cfg.get("mappings") if isinstance(raw_cfg, dict) else None
+    if not isinstance(mappings, dict):
+        return None
+
+    result: Dict[str, Any] = {}
+    default_map = mappings.get("default") or {}
+    if isinstance(default_map, dict):
+        result.update(default_map)
+
+    if source_table_name:
+        tbl_list = mappings.get("tables") or []
+        if isinstance(tbl_list, list):
+            for item in tbl_list:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("source_table", "")).strip().lower() == str(source_table_name).strip().lower():
+                    result.update(item)
+                    break
+
+    # 规范化部分字段的类型（列表/布尔等）
+    for list_key in ["include", "exclude", "order", "string_null_tokens"]:
+        if list_key in result and isinstance(result[list_key], str):
+            lst = _to_list(result[list_key])
+            if lst is not None:
+                result[list_key] = lst
+
+    for bool_key in []:
+        if bool_key in result and isinstance(result[bool_key], str):
+            bv = _to_bool(result[bool_key])
+            if bv is not None:
+                result[bool_key] = bv
+
+    return result or None
+
+
