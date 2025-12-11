@@ -381,7 +381,7 @@ class BigQueryClient:
     def test_connection(self) -> bool:
         """
         测试连接
-        
+
         Returns:
             连接是否成功
         """
@@ -393,3 +393,7 @@ class BigQueryClient:
         except Exception as e:
             logger.error(f"BigQuery连接测试失败: {e}")
             return False
+
+    def _test_connection(self) -> bool:
+        """内部测试连接方法（为了兼容性）"""
+        return self.test_connection()

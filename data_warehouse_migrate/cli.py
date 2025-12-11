@@ -16,14 +16,18 @@ logger = setup_logger(__name__)
 
 
 @click.command()
-@click.option('--source-project-id', 
-              help='MaxCompute源项目ID（可在配置文件中提供）')
-@click.option('--source-table-name', 
-              help='MaxCompute源表名（可在配置文件中提供）')
-@click.option('--destination-type',
-              type=click.Choice(['bigquery', 'mysql'], case_sensitive=False),
+@click.option('--source-type',
+              type=click.Choice(['maxcompute', 'mysql'], case_sensitive=False),
               default=None,
-              help='目标数据源类型: bigquery 或 mysql（可在配置文件中提供）')
+              help='源数据源类型: maxcompute 或 mysql（可在配置文件中提供）')
+@click.option('--source-project-id',
+              help='MaxCompute源项目ID（当source-type为maxcompute时需要，可在配置文件中提供）')
+@click.option('--source-table-name',
+              help='源表名（可在配置文件中提供）')
+@click.option('--destination-type',
+              type=click.Choice(['bigquery', 'mysql', 'maxcompute'], case_sensitive=False),
+              default=None,
+              help='目标数据源类型: bigquery、mysql 或 maxcompute（可在配置文件中提供）')
 @click.option('--destination-project-id', 
               help='BigQuery目标项目ID (仅当destination-type为bigquery时需要)')
 @click.option('--destination-dataset-id', 
@@ -44,6 +48,18 @@ logger = setup_logger(__name__)
               help='MaxCompute AccessKey Secret (可通过环境变量MAXCOMPUTE_SECRET_ACCESS_KEY设置)')
 @click.option('--maxcompute-endpoint',
               help='MaxCompute Endpoint (可通过环境变量MAXCOMPUTE_ENDPOINT设置)')
+# MySQL源配置
+@click.option('--mysql-source-host',
+              help='MySQL源主机 (当source-type为mysql时需要)')
+@click.option('--mysql-source-user',
+              help='MySQL源用户名')
+@click.option('--mysql-source-password',
+              help='MySQL源密码')
+@click.option('--mysql-source-database',
+              help='MySQL源数据库名')
+@click.option('--mysql-source-port',
+              type=int,
+              help='MySQL源端口')
 @click.option('--bigquery-credentials-path',
               help='BigQuery服务账号凭证文件路径 (可通过环境变量GOOGLE_APPLICATION_CREDENTIALS设置)')
 @click.option('--mysql-dest-host',
@@ -76,11 +92,12 @@ logger = setup_logger(__name__)
               help='当策略为fill时用于填充字符串/日期列的哨兵值，如 "N/A" 或 空字符串')
 @click.option('--dry-run',
               is_flag=True,
-              help='试运行模式，只检查连接和表结构，不实际迁移数据')
+              help='试运行模式，只检查连接和表结构，不实际迁移数据（适用于所有数据流方向）')
 @click.option('-f', '--config-file',
               default=None,
               help='配置文件路径（JSON），CLI > 文件 > 环境 进行合并')
-def main(source_project_id: str,
+def main(source_type: str,
+         source_project_id: str,
          source_table_name: str,
          destination_type: str,
          destination_project_id: Optional[str],
@@ -91,6 +108,11 @@ def main(source_project_id: str,
          maxcompute_access_id: Optional[str],
          maxcompute_secret_key: Optional[str],
          maxcompute_endpoint: Optional[str],
+         mysql_source_host: Optional[str],
+         mysql_source_user: Optional[str],
+         mysql_source_password: Optional[str],
+         mysql_source_database: Optional[str],
+         mysql_source_port: Optional[int],
          bigquery_credentials_path: Optional[str],
          mysql_dest_host: Optional[str],
          mysql_dest_user: Optional[str],
@@ -106,8 +128,11 @@ def main(source_project_id: str,
          config_file: Optional[str]):
     """
     数据仓库迁移工具
-    
-    支持从阿里云MaxCompute迁移数据到Google Cloud BigQuery
+
+    支持以下数据流方向：
+    1. MaxCompute -> BigQuery
+    2. MaxCompute -> MySQL
+    3. MySQL -> MaxCompute
     """
     
     # 初始日志级别（可能为None）；最终会在参数合并后再次设置
@@ -122,6 +147,7 @@ def main(source_project_id: str,
 
         # 2) 将 CLI 实参打包为 dict 参与合并
         cli_args = {
+            "source_type": source_type,
             "source_project_id": source_project_id,
             "source_table_name": source_table_name,
             "destination_type": destination_type,
@@ -133,7 +159,14 @@ def main(source_project_id: str,
             "maxcompute_access_id": maxcompute_access_id,
             "maxcompute_secret_key": maxcompute_secret_key,
             "maxcompute_endpoint": maxcompute_endpoint,
+            # MySQL源配置
+            "mysql_source_host": mysql_source_host,
+            "mysql_source_user": mysql_source_user,
+            "mysql_source_password": mysql_source_password,
+            "mysql_source_database": mysql_source_database,
+            "mysql_source_port": mysql_source_port,
             "bigquery_credentials_path": bigquery_credentials_path,
+            # MySQL目标配置
             "mysql_dest_host": mysql_dest_host,
             "mysql_dest_user": mysql_dest_user,
             "mysql_dest_password": mysql_dest_password,
@@ -151,6 +184,7 @@ def main(source_project_id: str,
         final_args = merge_with_cli_and_env(cli_args, file_cfg, config)
 
         # 将关键生效参数回写到局部变量，便于后续沿用
+        source_type = (final_args.get("source_type") or "").lower() or "maxcompute"
         source_project_id = final_args.get("source_project_id")
         source_table_name = final_args.get("source_table_name")
         destination_type = (final_args.get("destination_type") or "").lower() or "bigquery"
@@ -162,12 +196,19 @@ def main(source_project_id: str,
         maxcompute_access_id = final_args.get("maxcompute_access_id")
         maxcompute_secret_key = final_args.get("maxcompute_secret_key")
         maxcompute_endpoint = final_args.get("maxcompute_endpoint")
-        bigquery_credentials_path = final_args.get("bigquery_credentials_path")
+        # MySQL源参数
+        mysql_source_host = final_args.get("mysql_source_host")
+        mysql_source_user = final_args.get("mysql_source_user")
+        mysql_source_password = final_args.get("mysql_source_password")
+        mysql_source_database = final_args.get("mysql_source_database")
+        mysql_source_port = final_args.get("mysql_source_port")
+        # MySQL目标参数
         mysql_dest_host = final_args.get("mysql_dest_host")
         mysql_dest_user = final_args.get("mysql_dest_user")
         mysql_dest_password = final_args.get("mysql_dest_password")
         mysql_dest_database = final_args.get("mysql_dest_database")
         mysql_dest_port = final_args.get("mysql_dest_port")
+        bigquery_credentials_path = final_args.get("bigquery_credentials_path")
         preserve_tokens = final_args.get("preserve_string_null_tokens", config.preserve_string_null_tokens)
         tokens = final_args.get("string_null_tokens", config.string_null_tokens)
         null_policy = final_args.get("null_on_non_nullable", config.null_on_non_nullable)
@@ -186,7 +227,12 @@ def main(source_project_id: str,
         click.echo("=" * 60)
         click.echo("数据仓库迁移工具")
         click.echo("=" * 60)
-        click.echo(f"源项目ID: {source_project_id}")
+        click.echo(f"源类型: {source_type}")
+        if source_type == 'maxcompute':
+            click.echo(f"源项目ID: {source_project_id}")
+        elif source_type == 'mysql':
+            click.echo(f"MySQL源主机: {mysql_source_host}")
+            click.echo(f"MySQL源数据库: {mysql_source_database}")
         click.echo(f"源表名: {source_table_name}")
         click.echo(f"目标类型: {destination_type}")
         if destination_type == 'bigquery':
@@ -195,6 +241,8 @@ def main(source_project_id: str,
         elif destination_type == 'mysql':
             click.echo(f"MySQL目标主机: {mysql_dest_host}")
             click.echo(f"MySQL目标数据库: {mysql_dest_database}")
+        elif destination_type == 'maxcompute':
+            click.echo(f"目标项目ID: {destination_project_id}")
         click.echo(f"目标表名: {destination_table_name}")
         click.echo(f"迁移模式: {mode}")
         click.echo(f"批次大小: {batch_size}")
@@ -208,27 +256,43 @@ def main(source_project_id: str,
 
         # 终态参数校验
         _validate_configuration(
-            destination_type,
-            maxcompute_access_id,
-            maxcompute_secret_key,
-            maxcompute_endpoint,
-            bigquery_credentials_path,
-            mysql_dest_host,
-            mysql_dest_user,
-            mysql_dest_password,
-            mysql_dest_database,
-            mysql_dest_port
-        )
-
-        # 创建迁移器
-        migrator = DataMigrator(
-            source_project_id=source_project_id,
+            source_type=source_type,
             destination_type=destination_type,
-            destination_project_id=destination_project_id, # For BigQuery
             maxcompute_access_id=maxcompute_access_id,
             maxcompute_secret_key=maxcompute_secret_key,
             maxcompute_endpoint=maxcompute_endpoint,
             bigquery_credentials_path=bigquery_credentials_path,
+            # MySQL源配置
+            mysql_source_host=mysql_source_host,
+            mysql_source_user=mysql_source_user,
+            mysql_source_password=mysql_source_password,
+            mysql_source_database=mysql_source_database,
+            # MySQL目标配置
+            mysql_dest_host=mysql_dest_host,
+            mysql_dest_user=mysql_dest_user,
+            mysql_dest_password=mysql_dest_password,
+            mysql_dest_database=mysql_dest_database,
+            mysql_dest_port=mysql_dest_port
+        )
+
+        # 创建迁移器
+        migrator = DataMigrator(
+            source_type=source_type,
+            source_project_id=source_project_id,
+            source_table_name=source_table_name,
+            destination_type=destination_type,
+            destination_project_id=destination_project_id, # For BigQuery or MaxCompute
+            maxcompute_access_id=maxcompute_access_id,
+            maxcompute_secret_key=maxcompute_secret_key,
+            maxcompute_endpoint=maxcompute_endpoint,
+            # MySQL源配置
+            mysql_source_host=mysql_source_host,
+            mysql_source_user=mysql_source_user,
+            mysql_source_password=mysql_source_password,
+            mysql_source_database=mysql_source_database,
+            mysql_source_port=mysql_source_port,
+            bigquery_credentials_path=bigquery_credentials_path,
+            # MySQL目标配置
             mysql_dest_host=mysql_dest_host,
             mysql_dest_user=mysql_dest_user,
             mysql_dest_password=mysql_dest_password,
@@ -280,30 +344,50 @@ def main(source_project_id: str,
         sys.exit(1)
 
 
-def _validate_configuration(destination_type: str,
+def _validate_configuration(source_type: str,
+                          destination_type: str,
                           maxcompute_access_id: Optional[str],
                           maxcompute_secret_key: Optional[str],
                           maxcompute_endpoint: Optional[str],
                           bigquery_credentials_path: Optional[str],
-                          mysql_dest_host: Optional[str],
-                          mysql_dest_user: Optional[str],
-                          mysql_dest_password: Optional[str],
-                          mysql_dest_database: Optional[str],
-                          mysql_dest_port: Optional[int]) -> None:
+                          # MySQL源配置
+                          mysql_source_host: Optional[str] = None,
+                          mysql_source_user: Optional[str] = None,
+                          mysql_source_password: Optional[str] = None,
+                          mysql_source_database: Optional[str] = None,
+                          # MySQL目标配置
+                          mysql_dest_host: Optional[str] = None,
+                          mysql_dest_user: Optional[str] = None,
+                          mysql_dest_password: Optional[str] = None,
+                          mysql_dest_database: Optional[str] = None,
+                          mysql_dest_port: Optional[int] = None) -> None:
     """验证配置"""
     
-    # 检查MaxCompute配置
-    mc_access_id = maxcompute_access_id or config.maxcompute_access_id
-    mc_secret_key = maxcompute_secret_key or config.maxcompute_secret_access_key
-    mc_endpoint = maxcompute_endpoint or config.maxcompute_endpoint
-    
-    if not all([mc_access_id, mc_secret_key, mc_endpoint]):
-        raise ConfigurationError(
-            "MaxCompute配置不完整，请设置以下参数或环境变量：\n"
-            "- --maxcompute-access-id 或 MAXCOMPUTE_ACCESS_ID\n"
-            "- --maxcompute-secret-key 或 MAXCOMPUTE_SECRET_ACCESS_KEY\n"
-            "- --maxcompute-endpoint 或 MAXCOMPUTE_ENDPOINT"
-        )
+    # 根据数据流方向验证配置
+    # 如果源或目标涉及MaxCompute，需要验证MaxCompute配置
+    if source_type == 'maxcompute' or destination_type == 'maxcompute':
+        mc_access_id = maxcompute_access_id or config.maxcompute_access_id
+        mc_secret_key = maxcompute_secret_key or config.maxcompute_secret_access_key
+        mc_endpoint = maxcompute_endpoint or config.maxcompute_endpoint
+
+        if not all([mc_access_id, mc_secret_key, mc_endpoint]):
+            raise ConfigurationError(
+                "MaxCompute配置不完整，请设置以下参数或环境变量：\n"
+                "- --maxcompute-access-id 或 MAXCOMPUTE_ACCESS_ID\n"
+                "- --maxcompute-secret-key 或 MAXCOMPUTE_SECRET_ACCESS_KEY\n"
+                "- --maxcompute-endpoint 或 MAXCOMPUTE_ENDPOINT"
+            )
+
+    # 如果源是MySQL，需要验证MySQL源配置
+    if source_type == 'mysql':
+        if not all([mysql_source_host, mysql_source_user, mysql_source_password, mysql_source_database]):
+            raise ConfigurationError(
+                "MySQL源配置不完整，请设置以下参数：\n"
+                "- --mysql-source-host\n"
+                "- --mysql-source-user\n"
+                "- --mysql-source-password\n"
+                "- --mysql-source-database"
+            )
     
     # 检查目标配置
     if destination_type == 'bigquery':
@@ -329,40 +413,108 @@ def _validate_configuration(destination_type: str,
             )
 
 
-def _dry_run(migrator: DataMigrator, 
+def _dry_run(migrator: DataMigrator,
             source_table_name: str,
             destination_table_name: str,
             destination_dataset_id: Optional[str] = None) -> None:
     """试运行"""
-    
+
     click.echo("1. 测试数据库连接...")
     migrator._test_connections()
     click.echo("   ✓ 连接测试通过")
-    
+
     click.echo("2. 验证源表访问权限...")
-    if migrator.maxcompute_client.validate_table_access(source_table_name):
-        click.echo("   ✓ 源表访问验证成功")
+    # 根据源类型进行不同的验证
+    if migrator.source_type == 'maxcompute':
+        if hasattr(migrator.source_client, 'validate_table_access'):
+            if migrator.source_client.validate_table_access(source_table_name):
+                click.echo("   ✓ MaxCompute源表访问验证成功")
+            else:
+                click.echo("   ✗ MaxCompute源表访问验证失败")
+                return
+        else:
+            # 尝试获取表结构来验证访问权限
+            try:
+                migrator.source_client.get_table_schema(source_table_name)
+                click.echo("   ✓ MaxCompute源表访问验证成功")
+            except Exception as e:
+                click.echo(f"   ✗ MaxCompute源表访问验证失败: {e}")
+                return
     else:
-        click.echo("   ✗ 源表访问验证失败")
-        return
+        # MySQL或其他源类型，尝试获取表结构来验证
+        try:
+            migrator.source_client.get_table_schema(source_table_name)
+            click.echo(f"   ✓ {migrator.source_type.title()}源表访问验证成功")
+        except Exception as e:
+            click.echo(f"   ✗ {migrator.source_type.title()}源表访问验证失败: {e}")
+            return
 
     click.echo("3. 获取源表结构...")
-    columns = migrator.maxcompute_client.get_table_schema(source_table_name)
-    partition_columns = [col for col in columns if col.get('is_partition', False)]
-    regular_columns = [col for col in columns if not col.get('is_partition', False)]
+    columns = migrator.source_client.get_table_schema(source_table_name)
 
-    click.echo(f"   ✓ 源表包含 {len(regular_columns)} 个普通列")
-    if partition_columns:
-        partition_names = [col['name'] for col in partition_columns]
-        click.echo(f"   ✓ 源表包含 {len(partition_columns)} 个分区字段: {', '.join(partition_names)}")
+    # 根据源类型处理分区信息
+    if migrator.source_type == 'maxcompute':
+        partition_columns = [col for col in columns if col.get('is_partition', False)]
+        regular_columns = [col for col in columns if not col.get('is_partition', False)]
+        click.echo(f"   ✓ 源表包含 {len(regular_columns)} 个普通列")
+        if partition_columns:
+            partition_names = [col['name'] for col in partition_columns]
+            click.echo(f"   ✓ 源表包含 {len(partition_columns)} 个分区字段: {', '.join(partition_names)}")
+    else:
+        # MySQL表没有分区概念
+        click.echo(f"   ✓ {migrator.source_type.title()}源表包含 {len(columns)} 个列")
+
+        # 显示列信息预览（仅前10列）
+        if len(columns) > 0:
+            click.echo("   主要列信息:")
+            for i, col in enumerate(columns[:10]):
+                nullable = "可空" if col.get('is_nullable', True) else "非空"
+                comment = col.get('comment', '')
+                comment = f" - {comment}" if comment else ""
+                click.echo(f"     - {col['name']}: {col['type']} ({nullable}){comment}")
+            if len(columns) > 10:
+                click.echo(f"     ... 还有 {len(columns) - 10} 列")
 
     click.echo("4. 转换表结构...")
-    if migrator.destination_type == 'bigquery':
+    # 根据数据流方向进行不同的转换
+    if migrator.source_type == 'maxcompute' and migrator.destination_type == 'bigquery':
         destination_schema = migrator.schema_mapper.convert_maxcompute_to_bigquery_schema(columns)
         click.echo(f"   ✓ 成功转换 {len(destination_schema)} 列到BigQuery格式")
-    elif migrator.destination_type == 'mysql':
-        destination_schema = migrator.schema_mapper.convert_maxcompute_to_mysql_schema(columns)
-        click.echo(f"   ✓ 成功转换 {len(destination_schema)} 列到MySQL格式")
+    elif migrator.source_type == 'maxcompute' and migrator.destination_type == 'mysql':
+        # 应用字段映射计划（仅 MySQL 目的一期生效）
+        if getattr(migrator, 'column_mapping_plan', None):
+            try:
+                summary = migrator.generate_mysql_mapping_summary(columns)
+                if summary and summary.get('final_columns'):
+                    # 使用映射后的列信息
+                    prepared_columns, overrides, _ = migrator._prepare_mysql_schema_inputs(
+                        columns, migrator.column_mapping_plan
+                    )
+                    destination_schema = migrator.schema_mapper.convert_maxcompute_to_mysql_schema(
+                        prepared_columns,
+                        overrides=overrides
+                    )
+                    click.echo(f"   ✓ 成功转换 {len(destination_schema)} 列到MySQL格式（应用映射）")
+                else:
+                    destination_schema = migrator.schema_mapper.convert_maxcompute_to_mysql_schema(columns)
+                    click.echo(f"   ✓ 成功转换 {len(destination_schema)} 列到MySQL格式")
+            except Exception as e:
+                logger.debug(f"dry-run MySQL映射转换失败，使用基础转换: {e}")
+                destination_schema = migrator.schema_mapper.convert_maxcompute_to_mysql_schema(columns)
+                click.echo(f"   ✓ 成功转换 {len(destination_schema)} 列到MySQL格式")
+        else:
+            destination_schema = migrator.schema_mapper.convert_maxcompute_to_mysql_schema(columns)
+            click.echo(f"   ✓ 成功转换 {len(destination_schema)} 列到MySQL格式")
+    elif migrator.source_type == 'mysql' and migrator.destination_type == 'maxcompute':
+        destination_schema = migrator.schema_mapper.convert_mysql_to_maxcompute_schema(columns)
+        click.echo(f"   ✓ 成功转换 {len(destination_schema)} 列到MaxCompute格式")
+    elif migrator.source_type == 'mysql' and migrator.destination_type == 'bigquery':
+        # MySQL到BigQuery需要两步转换：MySQL -> MaxCompute -> BigQuery
+        temp_schema = migrator.schema_mapper.convert_mysql_to_maxcompute_schema(columns)
+        destination_schema = migrator.schema_mapper.convert_maxcompute_to_bigquery_schema(temp_schema)
+        click.echo(f"   ✓ 成功转换 {len(destination_schema)} 列到BigQuery格式")
+    else:
+        click.echo(f"   ✓ 支持的数据流: {migrator.source_type} -> {migrator.destination_type}")
     
     click.echo("5. 检查目标表...")
     if migrator.destination_type == 'mysql':
@@ -370,7 +522,7 @@ def _dry_run(migrator: DataMigrator,
             migrator.destination_client.database,
             destination_table_name
         )
-    else:
+    elif migrator.destination_type == 'bigquery':
         if not destination_dataset_id:
             click.echo("   ✗ 未提供BigQuery目标数据集ID，无法检查目标表")
             return
@@ -378,12 +530,27 @@ def _dry_run(migrator: DataMigrator,
             destination_dataset_id,
             destination_table_name
         )
+    elif migrator.destination_type == 'maxcompute':
+        table_exists = migrator.destination_client.table_exists(destination_table_name)
+    else:
+        click.echo(f"   ⚠ 不支持的目标类型: {migrator.destination_type}")
+        table_exists = False
+
     if table_exists:
         click.echo("   ✓ 目标表已存在")
     else:
         click.echo("   ✓ 目标表不存在，迁移时将创建")
 
-    # 6. 映射摘要（仅 MySQL 且存在映射）
+    # 6. 获取源表行数（可选）
+    try:
+        if hasattr(migrator.source_client, 'get_row_count'):
+            row_count = migrator.source_client.get_row_count(source_table_name)
+            click.echo(f"6. 源表数据量...")
+            click.echo(f"   ✓ 预计行数: {row_count:,}")
+    except Exception as e:
+        logger.debug(f"dry-run 获取行数失败: {e}")
+
+    # 7. 映射摘要（仅 MySQL 目标且存在映射）
     if migrator.destination_type == 'mysql' and getattr(migrator, 'column_mapping_plan', None):
         try:
             summary = migrator.generate_mysql_mapping_summary(columns)

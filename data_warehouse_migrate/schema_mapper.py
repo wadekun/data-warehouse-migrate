@@ -128,7 +128,117 @@ class SchemaMapper:
                     col['type'] = lower_override[lname]
 
         return mysql_schema
-    
+
+    # MySQL到MaxCompute的类型映射
+    TYPE_MAPPING_MYSQL_TO_MAXCOMPUTE = {
+        'tinyint': 'tinyint',
+        'smallint': 'smallint',
+        'int': 'int',
+        'integer': 'int',
+        'bigint': 'bigint',
+        'float': 'float',
+        'double': 'double',
+        'decimal': 'decimal',
+        'numeric': 'decimal',
+        'varchar': 'string',
+        'char': 'char',
+        'text': 'string',
+        'longtext': 'string',
+        'mediumtext': 'string',
+        'tinytext': 'string',
+        'json': 'string',
+        'boolean': 'boolean',
+        'bool': 'boolean',
+        'date': 'date',
+        'datetime': 'datetime',
+        'timestamp': 'timestamp',
+        'blob': 'binary',
+        'longblob': 'binary',
+        'mediumblob': 'binary',
+        'tinyblob': 'binary',
+        'enum': 'string',
+        'set': 'string'
+    }
+
+    @classmethod
+    def convert_mysql_to_maxcompute_schema(cls, mysql_columns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        将MySQL表结构转换为MaxCompute表结构
+
+        Args:
+            mysql_columns: MySQL列信息列表
+
+        Returns:
+            MaxCompute列信息列表
+        """
+        maxcompute_columns = []
+        seen_lower_names: set[str] = set()
+
+        for column in mysql_columns:
+            # 检查重复列名（按小写）
+            name = column['name']
+            name_lower = name.lower()
+            if name_lower in seen_lower_names:
+                logger.warning(f"检测到重复列名 '{name}'，已去重保留首次出现")
+                continue
+
+            mysql_type = column['type'].lower()
+
+            # 提取基础类型（去掉长度等参数）
+            base_type = mysql_type.split('(')[0]
+
+            # 特殊处理ENUM和SET类型
+            if base_type in ['enum', 'set']:
+                base_type = 'string'
+                logger.info(f"列 {name}: 将MySQL {mysql_type} 类型转换为MaxCompute的string类型")
+
+            # 转换类型
+            original_type = mysql_type
+            maxcompute_type = cls.TYPE_MAPPING_MYSQL_TO_MAXCOMPUTE.get(
+                base_type,
+                'string'  # 默认转换为string
+            )
+
+            # 处理特殊类型
+            if base_type in ['decimal', 'numeric'] and '(' in mysql_type:
+                # 保留decimal的精度信息
+                maxcompute_type = mysql_type
+            elif base_type == 'char' and '(' in mysql_type:
+                # 保留char的长度信息
+                maxcompute_type = mysql_type
+            elif base_type == 'tinyint':
+                # 检查是否是布尔类型
+                if column.get('is_nullable', False):
+                    # 可空的tinyint可能是布尔值，保持为tinyint
+                    maxcompute_type = 'tinyint'
+                else:
+                    # 非空的tinyint(1)通常用作布尔值
+                    if 'tinyint(1)' in mysql_type:
+                        maxcompute_type = 'boolean'
+                        logger.warning(f"列 {name}: MySQL {original_type} 被推断为布尔类型，转换为MaxCompute boolean。如果该列用于存储数值，请手动覆盖类型映射")
+
+            # 记录类型转换（如果发生变化）
+            if original_type != maxcompute_type and base_type != 'tinyint(1)':
+                logger.info(f"列 {name}: MySQL {original_type} -> MaxCompute {maxcompute_type}")
+
+            # 处理MaxCompute不支持的特性
+            # MaxCompute不支持默认值（除了NULL）
+            # MySQL的AUTO_INCREMENT需要手动处理
+            if column.get('default') and column['default'] == 'AUTO_INCREMENT':
+                logger.info(f"列 {name} 包含自增属性，MaxCompute不支持，将作为普通整数列")
+
+            maxcompute_columns.append({
+                'name': name,
+                'type': maxcompute_type,
+                'comment': column.get('comment', ''),
+                'is_nullable': column.get('is_nullable', True)
+            })
+
+            seen_lower_names.add(name_lower)
+
+        logger.info(f"MySQL到MaxCompute结构转换完成，共 {len(maxcompute_columns)} 列")
+        return maxcompute_columns
+
     @classmethod
     def _convert_column(cls, column: Dict[str, Any]) -> bigquery.SchemaField:
         """

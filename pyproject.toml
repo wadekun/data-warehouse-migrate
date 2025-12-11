@@ -1,7 +1,7 @@
 [project]
 name = "data-warehouse-migrate"
 version = "0.1.0"
-description = "数仓迁移工具，支持从阿里云MaxCompute迁移到Google Cloud BigQuery"
+description = "数仓迁移工具，支持MaxCompute、MySQL和BigQuery之间的双向数据迁移"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

@@ -82,6 +82,8 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # source
     source = cfg.get("source") or {}
     if isinstance(source, dict):
+        if "type" in source:
+            out.setdefault("source_type", source.get("type"))
         if "project_id" in source:
             out.setdefault("source_project_id", source.get("project_id"))
         if "table_name" in source:
@@ -93,6 +95,19 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
             out.setdefault("maxcompute_secret_key", source.get("maxcompute_secret_key"))
         if "maxcompute_endpoint" in source:
             out.setdefault("maxcompute_endpoint", source.get("maxcompute_endpoint"))
+        # MySQL源配置
+        mysql_source = source.get("mysql") or {}
+        if isinstance(mysql_source, dict):
+            if "host" in mysql_source:
+                out.setdefault("mysql_source_host", mysql_source.get("host"))
+            if "port" in mysql_source:
+                out.setdefault("mysql_source_port", mysql_source.get("port"))
+            if "user" in mysql_source:
+                out.setdefault("mysql_source_user", mysql_source.get("user"))
+            if "password" in mysql_source:
+                out.setdefault("mysql_source_password", mysql_source.get("password"))
+            if "database" in mysql_source:
+                out.setdefault("mysql_source_database", mysql_source.get("database"))
 
     # destination
     dest = cfg.get("destination") or {}
@@ -118,6 +133,17 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 out.setdefault("mysql_dest_password", dmysql.get("password"))
             if "database" in dmysql:
                 out.setdefault("mysql_dest_database", dmysql.get("database"))
+        # destination.maxcompute
+        dmaxcompute = dest.get("maxcompute") or {}
+        if isinstance(dmaxcompute, dict):
+            if "project_id" in dmaxcompute:
+                out.setdefault("destination_project_id", dmaxcompute.get("project_id"))
+            if "access_id" in dmaxcompute:
+                out.setdefault("maxcompute_access_id", dmaxcompute.get("access_id"))
+            if "secret_key" in dmaxcompute:
+                out.setdefault("maxcompute_secret_key", dmaxcompute.get("secret_key"))
+            if "endpoint" in dmaxcompute:
+                out.setdefault("maxcompute_endpoint", dmaxcompute.get("endpoint"))
 
     # run
     run = cfg.get("run") or {}
@@ -186,6 +212,7 @@ def merge_with_cli_and_env(cli_args: Dict[str, Any], file_cfg: Dict[str, Any], e
                 merged[key] = env_val
 
     # 基本参数
+    pick("source_type", cli_args.get("source_type"), env_val=None)
     pick("source_project_id", cli_args.get("source_project_id"), env_val=None)
     pick("source_table_name", cli_args.get("source_table_name"), env_val=None)
 
@@ -203,6 +230,14 @@ def merge_with_cli_and_env(cli_args: Dict[str, Any], file_cfg: Dict[str, Any], e
     pick("bigquery_credentials_path", cli_args.get("bigquery_credentials_path"), env_val=env_cfg.bigquery_credentials_path)
 
     # MySQL
+    # MySQL源配置
+    pick("mysql_source_host", cli_args.get("mysql_source_host"), env_val=env_cfg.mysql_source_host)
+    pick("mysql_source_user", cli_args.get("mysql_source_user"), env_val=env_cfg.mysql_source_user)
+    pick("mysql_source_password", cli_args.get("mysql_source_password"), env_val=env_cfg.mysql_source_password)
+    pick("mysql_source_database", cli_args.get("mysql_source_database"), env_val=env_cfg.mysql_source_database)
+    pick("mysql_source_port", cli_args.get("mysql_source_port"), env_val=env_cfg.mysql_source_port)
+
+    # MySQL目标配置
     pick("mysql_dest_host", cli_args.get("mysql_dest_host"), env_val=env_cfg.mysql_dest_host)
     pick("mysql_dest_user", cli_args.get("mysql_dest_user"), env_val=env_cfg.mysql_dest_user)
     pick("mysql_dest_password", cli_args.get("mysql_dest_password"), env_val=env_cfg.mysql_dest_password)
@@ -231,6 +266,10 @@ def merge_with_cli_and_env(cli_args: Dict[str, Any], file_cfg: Dict[str, Any], e
         iv = _to_int(merged.get("mysql_dest_port"))
         if iv is not None:
             merged["mysql_dest_port"] = iv
+    if isinstance(merged.get("mysql_source_port"), str):
+        iv = _to_int(merged.get("mysql_source_port"))
+        if iv is not None:
+            merged["mysql_source_port"] = iv
     if isinstance(merged.get("batch_size"), str):
         iv = _to_int(merged.get("batch_size"))
         if iv is not None:

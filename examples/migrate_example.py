@@ -43,14 +43,27 @@ def main():
         logger.info("开始数据迁移示例")
         
         # 创建迁移器
+        # 方式1：使用新的显式参数（推荐）
         migrator = DataMigrator(
+            source_type='maxcompute',  # 明确指定源类型
             source_project_id=config['source_project_id'],
+            destination_type='bigquery',  # 明确指定目标类型
             destination_project_id=config['destination_project_id'],
             maxcompute_access_id=config['maxcompute_access_id'],
             maxcompute_secret_key=config['maxcompute_secret_key'],
             maxcompute_endpoint=config['maxcompute_endpoint'],
             bigquery_credentials_path=config['bigquery_credentials_path']
         )
+
+        # 方式2：使用默认值（向后兼容，默认maxcompute->bigquery）
+        # migrator = DataMigrator(
+        #     source_project_id=config['source_project_id'],
+        #     destination_project_id=config['destination_project_id'],
+        #     maxcompute_access_id=config['maxcompute_access_id'],
+        #     maxcompute_secret_key=config['maxcompute_secret_key'],
+        #     maxcompute_endpoint=config['maxcompute_endpoint'],
+        #     bigquery_credentials_path=config['bigquery_credentials_path']
+        # )
         
         # 执行迁移
         migrator.migrate_table(

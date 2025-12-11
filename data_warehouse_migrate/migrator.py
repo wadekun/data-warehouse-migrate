@@ -27,21 +27,33 @@ class MigrationMode(Enum):
 
 
 class DataMigrator:
-    """数据迁移器"""
-    
-    def __init__(self, 
-                 source_project_id: str,
-                 destination_type: str,
+    """数据迁移器（支持双向）"""
+
+    def __init__(self,
+                 source_type: Optional[str] = None,  # 新增参数：源类型，默认为maxcompute以保持向后兼容
+                 source_project_id: Optional[str] = None,  # MaxCompute项目ID（当source_type=maxcompute时需要）
+                 source_table_name: Optional[str] = None,
+                 destination_type: Optional[str] = None,  # 默认为bigquery以保持向后兼容
                  destination_project_id: Optional[str] = None,
+                 # MaxCompute配置（源或目标）
                  maxcompute_access_id: Optional[str] = None,
                  maxcompute_secret_key: Optional[str] = None,
                  maxcompute_endpoint: Optional[str] = None,
-                 bigquery_credentials_path: Optional[str] = None,
+                 # MySQL源配置（当source_type=mysql时需要）
+                 mysql_source_host: Optional[str] = None,
+                 mysql_source_user: Optional[str] = None,
+                 mysql_source_password: Optional[str] = None,
+                 mysql_source_database: Optional[str] = None,
+                 mysql_source_port: Optional[int] = None,
+                 # MySQL目标配置（当destination_type=mysql时需要）
                  mysql_dest_host: Optional[str] = None,
                  mysql_dest_user: Optional[str] = None,
                  mysql_dest_password: Optional[str] = None,
                  mysql_dest_database: Optional[str] = None,
                  mysql_dest_port: Optional[int] = None,
+                 # BigQuery配置
+                 bigquery_credentials_path: Optional[str] = None,
+                 # 其他参数
                  preserve_string_null_tokens: bool = True,
                  string_null_tokens: Optional[List[str]] = None,
                  null_on_non_nullable: str = 'fail',
@@ -49,33 +61,55 @@ class DataMigrator:
                  column_mapping_plan: Optional[Dict[str, Any]] = None):
         """
         初始化数据迁移器
-        
+
         Args:
-            source_project_id: MaxCompute项目ID
-            destination_type: 目标数据源类型 (bigquery 或 mysql)
-            destination_project_id: BigQuery项目ID (仅当destination_type为bigquery时需要)
+            source_type: 源数据源类型 (maxcompute 或 mysql)
+            source_project_id: MaxCompute项目ID（当source_type为maxcompute时需要）
+            source_table_name: 源表名
+            destination_type: 目标数据源类型 (bigquery, mysql 或 maxcompute)
+            destination_project_id: BigQuery/MaxCompute项目ID
             maxcompute_access_id: MaxCompute AccessKey ID
             maxcompute_secret_key: MaxCompute AccessKey Secret
             maxcompute_endpoint: MaxCompute endpoint
-            bigquery_credentials_path: BigQuery凭证文件路径
+            mysql_source_host: MySQL源主机
+            mysql_source_user: MySQL源用户名
+            mysql_source_password: MySQL源密码
+            mysql_source_database: MySQL源数据库名
+            mysql_source_port: MySQL源端口
             mysql_dest_host: MySQL目标主机
             mysql_dest_user: MySQL目标用户名
             mysql_dest_password: MySQL目标密码
             mysql_dest_database: MySQL目标数据库
             mysql_dest_port: MySQL目标端口
+            bigquery_credentials_path: BigQuery凭证文件路径
         """
+        # 设置默认值以保持向后兼容
+        if source_type is None:
+            source_type = 'maxcompute'
+        if destination_type is None:
+            destination_type = 'bigquery'
+
+        self.source_type = source_type
         self.source_project_id = source_project_id
+        self.source_table_name = source_table_name
         self.destination_type = destination_type
-        
-        # 初始化MaxCompute客户端
-        self.maxcompute_client = MaxComputeClient(
-            access_id=maxcompute_access_id,
-            secret_access_key=maxcompute_secret_key,
-            endpoint=maxcompute_endpoint,
-            project=source_project_id
+        self.destination_project_id = destination_project_id
+
+        # 创建源客户端
+        self.source_client = self._create_source_client(
+            source_type,
+            source_project_id=source_project_id,
+            maxcompute_access_id=maxcompute_access_id,
+            maxcompute_secret_key=maxcompute_secret_key,
+            maxcompute_endpoint=maxcompute_endpoint,
+            mysql_source_host=mysql_source_host,
+            mysql_source_user=mysql_source_user,
+            mysql_source_password=mysql_source_password,
+            mysql_source_database=mysql_source_database,
+            mysql_source_port=mysql_source_port
         )
-        
-        # 初始化目标客户端
+
+        # 创建目标客户端
         self.destination_client = self._create_destination_client(
             destination_type,
             destination_project_id=destination_project_id,
@@ -84,9 +118,12 @@ class DataMigrator:
             mysql_dest_user=mysql_dest_user,
             mysql_dest_password=mysql_dest_password,
             mysql_dest_database=mysql_dest_database,
-            mysql_dest_port=mysql_dest_port
+            mysql_dest_port=mysql_dest_port,
+            maxcompute_access_id=maxcompute_access_id,
+            maxcompute_secret_key=maxcompute_secret_key,
+            maxcompute_endpoint=maxcompute_endpoint
         )
-        
+
         self.schema_mapper = SchemaMapper()
         self._source_schema_cache = {}  # 缓存源表结构
         self._destination_schema_cache = {}  # 缓存目标表结构
@@ -98,9 +135,37 @@ class DataMigrator:
         self.null_fill_sentinel = null_fill_sentinel
         self.column_mapping_plan = column_mapping_plan if column_mapping_plan else None
 
+    def _create_source_client(self, source_type: str, **kwargs):
+        """创建源客户端"""
+        if source_type == 'maxcompute':
+            if not all([kwargs.get('source_project_id'), kwargs.get('maxcompute_access_id'),
+                       kwargs.get('maxcompute_secret_key'), kwargs.get('maxcompute_endpoint')]):
+                raise ConfigurationError("MaxCompute源配置不完整")
+            return MaxComputeClient(
+                access_id=kwargs.get('maxcompute_access_id'),
+                secret_access_key=kwargs.get('maxcompute_secret_key'),
+                endpoint=kwargs.get('maxcompute_endpoint'),
+                project=kwargs.get('source_project_id')
+            )
+        elif source_type == 'mysql':
+            if not all([kwargs.get('mysql_source_host'), kwargs.get('mysql_source_user'),
+                       kwargs.get('mysql_source_password'), kwargs.get('mysql_source_database')]):
+                raise ConfigurationError("MySQL源配置不完整")
+            from .mysql_reader import MySQLReader
+            return MySQLReader(
+                host=kwargs.get('mysql_source_host'),
+                user=kwargs.get('mysql_source_user'),
+                password=kwargs.get('mysql_source_password'),
+                database=kwargs.get('mysql_source_database'),
+                port=(kwargs.get('mysql_source_port') or 3306)
+            )
+        else:
+            raise ValueError(f"不支持的源类型: {source_type}")
+
     def _create_destination_client(self, destination_type: str, **kwargs):
         if destination_type == 'mysql':
-            if not all([kwargs.get('mysql_dest_host'), kwargs.get('mysql_dest_user'), kwargs.get('mysql_dest_password'), kwargs.get('mysql_dest_database')]):
+            if not all([kwargs.get('mysql_dest_host'), kwargs.get('mysql_dest_user'),
+                       kwargs.get('mysql_dest_password'), kwargs.get('mysql_dest_database')]):
                 raise ConfigurationError("MySQL目标配置不完整")
             return MySQLWriter(
                 host=kwargs.get('mysql_dest_host'),
@@ -115,6 +180,17 @@ class DataMigrator:
             return BigQueryClient(
                 project_id=kwargs.get('destination_project_id'),
                 credentials_path=kwargs.get('bigquery_credentials_path')
+            )
+        elif destination_type == 'maxcompute':
+            if not all([kwargs.get('maxcompute_access_id'), kwargs.get('maxcompute_secret_key'),
+                       kwargs.get('maxcompute_endpoint'), kwargs.get('destination_project_id')]):
+                raise ConfigurationError("MaxCompute目标配置不完整")
+            from .maxcompute_writer import MaxComputeWriter
+            return MaxComputeWriter(
+                access_id=kwargs.get('maxcompute_access_id'),
+                secret_access_key=kwargs.get('maxcompute_secret_key'),
+                endpoint=kwargs.get('maxcompute_endpoint'),
+                project=kwargs.get('destination_project_id')
             )
         else:
             raise ValueError(f"不支持的目标类型: {destination_type}")
@@ -169,16 +245,18 @@ class DataMigrator:
     def _test_connections(self) -> None:
         """测试连接"""
         logger.info("测试数据库连接...")
-        
-        if not self.maxcompute_client.test_connection():
-            raise DataMigrationError("MaxCompute连接失败")
-        
+
+        # 测试源客户端
+        if not self.source_client.test_connection():
+            raise DataMigrationError(f"源数据库 ({self.source_type}) 连接失败")
+
+        # 测试目标客户端
         if not self.destination_client._test_connection():
             raise DataMigrationError(f"目标数据库 ({self.destination_type}) 连接失败")
-        
+
         logger.info("数据库连接测试通过")
     
-    def _handle_table_schema(self, 
+    def _handle_table_schema(self,
                            source_table_name: str,
                            destination_table_name: str,
                            mode: MigrationMode,
@@ -186,7 +264,7 @@ class DataMigrator:
                            destination_database: Optional[str] = None) -> None:
         """处理表结构"""
         logger.info("处理表结构...")
-        
+
         # 检查目标表是否存在
         if self.destination_type == 'bigquery':
             if not destination_dataset_id:
@@ -204,6 +282,9 @@ class DataMigrator:
                 destination_database,
                 destination_table_name
             )
+        elif self.destination_type == 'maxcompute':
+            # MaxCompute表存在检查
+            table_exists = self.destination_client.table_exists(destination_table_name)
         else:
             raise ValueError(f"不支持的目标类型: {self.destination_type}")
         
@@ -211,6 +292,9 @@ class DataMigrator:
             if mode == MigrationMode.OVERWRITE:
                 if self.destination_type == 'mysql':
                     logger.info("目标MySQL表已存在，执行TRUNCATE TABLE清空数据")
+                    self.destination_client.truncate_table(destination_table_name)
+                elif self.destination_type == 'maxcompute':
+                    logger.info("目标MaxCompute表已存在，执行TRUNCATE TABLE清空数据")
                     self.destination_client.truncate_table(destination_table_name)
                 else: # BigQuery overwrite logic (drop and recreate)
                     logger.info("目标BigQuery表已存在，删除并重新创建")
@@ -221,40 +305,46 @@ class DataMigrator:
                     table_exists = False # Recreate table
             else: # mode == MigrationMode.APPEND
                 logger.info("目标表已存在，将追加数据")
-        
+
+        # 获取源表结构
+        logger.info(f"获取源表 {source_table_name} 的结构")
+        if self.source_type == 'maxcompute':
+            source_columns = self.source_client.get_table_schema(source_table_name)
+        elif self.source_type == 'mysql':
+            source_columns = self.source_client.get_table_schema(source_table_name)
+        else:
+            raise ValueError(f"不支持的源类型: {self.source_type}")
+
         if not table_exists:
-            # 验证源表访问权限（特别是分区表）
-            logger.info(f"验证源表 {source_table_name} 的访问权限")
-            if not self.maxcompute_client.validate_table_access(source_table_name):
-                raise DataMigrationError(f"无法访问源表 {source_table_name}，请检查表是否存在或分区配置")
-
-            # 获取源表结构
-            logger.info(f"获取源表 {source_table_name} 的结构")
-            maxcompute_columns = self.maxcompute_client.get_table_schema(source_table_name)
-
             # 转换为目标结构
             logger.info("转换表结构")
-            if self.destination_type == 'bigquery':
+
+            # 根据源类型和目标类型进行不同的转换
+            if self.source_type == 'maxcompute' and self.destination_type == 'bigquery':
                 destination_schema = self.schema_mapper.convert_maxcompute_to_bigquery_schema(
-                    maxcompute_columns
+                    source_columns
                 )
-            elif self.destination_type == 'mysql':
+            elif self.source_type == 'maxcompute' and self.destination_type == 'mysql':
                 # 应用字段映射计划（仅 MySQL 一期）
                 if self.column_mapping_plan:
-                    self._validate_mapping_mysql(self.column_mapping_plan, maxcompute_columns)
-                    prepared_columns, overrides, _ = self._prepare_mysql_schema_inputs(maxcompute_columns, self.column_mapping_plan)
+                    self._validate_mapping_mysql(self.column_mapping_plan, source_columns)
+                    prepared_columns, overrides, _ = self._prepare_mysql_schema_inputs(source_columns, self.column_mapping_plan)
                     destination_schema = self.schema_mapper.convert_maxcompute_to_mysql_schema(
                         prepared_columns,
                         overrides=overrides
                     )
                 else:
                     destination_schema = self.schema_mapper.convert_maxcompute_to_mysql_schema(
-                        maxcompute_columns
+                        source_columns
                     )
                 # 兜底去重，避免重复列（大小写不敏感）
                 destination_schema = self._dedupe_mysql_schema(destination_schema)
+            elif self.source_type == 'mysql' and self.destination_type == 'maxcompute':
+                destination_schema = self.schema_mapper.convert_mysql_to_maxcompute_schema(
+                    source_columns
+                )
             else:
-                raise ValueError(f"不支持的目标类型: {self.destination_type}")
+                raise ValueError(f"不支持的数据流: {self.source_type} -> {self.destination_type}")
 
             # 创建目标表
             logger.info(f"创建目标表 {destination_table_name}")
@@ -263,7 +353,7 @@ class DataMigrator:
                     destination_dataset_id,
                     destination_table_name,
                     destination_schema,
-                    f"从MaxCompute表 {source_table_name} 迁移"
+                    f"从{self.source_type}表 {source_table_name} 迁移"
                 )
             elif self.destination_type == 'mysql':
                 self.destination_client.create_table(
@@ -271,10 +361,17 @@ class DataMigrator:
                     destination_schema,
                     mode.value
                 )
+            elif self.destination_type == 'maxcompute':
+                # 创建MaxCompute表
+                self.destination_client.create_table(
+                    destination_table_name,
+                    destination_schema,
+                    comment=f"从{self.source_type}表 {source_table_name} 迁移"
+                )
             else:
                 raise ValueError(f"不支持的目标类型: {self.destination_type}")
     
-    def _migrate_table_data(self, 
+    def _migrate_table_data(self,
                           source_table_name: str,
                           destination_table_name: str,
                           mode: MigrationMode,
@@ -282,15 +379,13 @@ class DataMigrator:
         """迁移表数据"""
         logger.info("开始迁移数据...")
 
-        # Get source schema (already available)
-        maxcompute_columns = self.maxcompute_client.get_table_schema(source_table_name)
-
         batch_count = 0
         total_rows = 0
 
         try:
-            data_iterator = self.maxcompute_client.get_table_data(
-                source_table_name, 
+            # 使用源客户端获取数据
+            data_iterator = self.source_client.get_table_data(
+                source_table_name,
                 batch_size=batch_size
             )
             
@@ -356,7 +451,7 @@ class DataMigrator:
         try:
             # 获取或使用缓存的源表结构
             if source_table_name not in self._source_schema_cache:
-                source_columns = self.maxcompute_client.get_table_schema(source_table_name)
+                source_columns = self.source_client.get_table_schema(source_table_name)
 
                 # 创建列名到类型的映射
                 column_types = {}
@@ -374,13 +469,21 @@ class DataMigrator:
 
             for column in typed_df.columns:
                 if column in column_types:
-                    maxcompute_type = column_types[column]
+                    source_type = column_types[column]
                     try:
-                        typed_df[column] = self._convert_column_by_source_type(
-                            typed_df[column], column, maxcompute_type
-                        )
+                        # 根据源类型调用不同的转换方法
+                        if self.source_type == 'maxcompute':
+                            typed_df[column] = self._convert_column_by_source_type(
+                                typed_df[column], column, source_type
+                            )
+                        elif self.source_type == 'mysql':
+                            # MySQL到MaxCompute的类型转换可以更简单
+                            typed_df[column] = self._convert_mysql_column_type(
+                                typed_df[column], column, source_type
+                            )
+
                         # 修复：强制string/varchar/char类型字段为object类型，防止float64残留
-                        if any(t in maxcompute_type for t in ['string', 'varchar', 'char']):
+                        if any(t in source_type for t in ['string', 'varchar', 'char', 'text']):
                             typed_df[column] = typed_df[column].astype(object)
                     except Exception as e:
                         logger.warning(f"根据源表类型转换列 {column} 失败: {e}，保持原始类型")
@@ -481,6 +584,46 @@ class DataMigrator:
         # 其他类型保持原样
         else:
             logger.debug(f"列 {column_name} 保持原始类型（未知的MaxCompute类型: {maxcompute_type}）")
+            return series
+
+    def _convert_mysql_column_type(self, series: pd.Series, column_name: str, mysql_type: str) -> pd.Series:
+        """
+        根据MySQL源表类型转换列数据
+
+        Args:
+            series: pandas Series
+            column_name: 列名
+            mysql_type: MySQL数据类型
+
+        Returns:
+            转换后的Series
+        """
+        logger.debug(f"列 {column_name} MySQL类型: {mysql_type}")
+
+        # 提取基础类型
+        base_type = mysql_type.split('(')[0].lower()
+
+        # MySQL类型通常已经是正确的，只需要处理特殊情况
+        if base_type in ['tinyint', 'smallint', 'mediumint', 'int', 'integer']:
+            # 整数类型
+            return series.astype('Int64' if series.isna().any() else 'int64')
+        elif base_type == 'bigint':
+            return series.astype('Int64' if series.isna().any() else 'int64')
+        elif base_type in ['float', 'double']:
+            return series.astype('float64')
+        elif base_type in ['decimal', 'numeric']:
+            return series  # decimal类型在pandas中通常保持为object
+        elif base_type in ['date', 'datetime', 'timestamp']:
+            # 日期时间类型
+            try:
+                return pd.to_datetime(series, errors='coerce')
+            except:
+                return series
+        elif base_type == 'boolean' or (base_type == 'tinyint' and 'tinyint(1)' in mysql_type):
+            # 布尔类型
+            return series.astype('boolean')
+        else:
+            # 字符串类型和其他
             return series
 
     def _basic_dataframe_cleanup(self, df):

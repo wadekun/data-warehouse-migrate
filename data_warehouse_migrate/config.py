@@ -35,6 +35,13 @@ class Config:
         # BigQuery配置
         self.bigquery_credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
         
+        # MySQL Source Configuration
+        self.mysql_source_host = os.getenv("MYSQL_SOURCE_HOST")
+        self.mysql_source_user = os.getenv("MYSQL_SOURCE_USER")
+        self.mysql_source_password = os.getenv("MYSQL_SOURCE_PASSWORD")
+        self.mysql_source_database = os.getenv("MYSQL_SOURCE_DATABASE")
+        self.mysql_source_port = int(os.getenv("MYSQL_SOURCE_PORT", 3306))
+
         # MySQL Destination Configuration
         self.mysql_dest_host = os.getenv("MYSQL_DEST_HOST")
         self.mysql_dest_user = os.getenv("MYSQL_DEST_USER")
@@ -62,10 +69,28 @@ class Config:
             self.maxcompute_secret_access_key,
             self.maxcompute_endpoint
         ])
-    
+
     def validate_bigquery_config(self) -> bool:
         """验证BigQuery配置"""
         return bool(self.bigquery_credentials_path and os.path.exists(self.bigquery_credentials_path))
+
+    def validate_mysql_source_config(self) -> bool:
+        """验证MySQL源配置"""
+        return all([
+            self.mysql_source_host,
+            self.mysql_source_user,
+            self.mysql_source_password,
+            self.mysql_source_database
+        ])
+
+    def validate_mysql_dest_config(self) -> bool:
+        """验证MySQL目标配置"""
+        return all([
+            self.mysql_dest_host,
+            self.mysql_dest_user,
+            self.mysql_dest_password,
+            self.mysql_dest_database
+        ])
 
 
 # 全局配置实例

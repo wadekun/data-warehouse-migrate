@@ -1,0 +1,34 @@
+{
+  "source": {
+    "type": "mysql",
+    "mysql": {
+      "host": "localhost",
+      "port": 3306,
+      "user": "root",
+      "password": "${MYSQL_PASSWORD}",
+      "database": "production_db"
+    },
+    "table_name": "orders"
+  },
+  "destination": {
+    "type": "maxcompute",
+    "maxcompute": {
+      "project_id": "data_warehouse",
+      "access_id": "${MAXCOMPUTE_ACCESS_ID}",
+      "secret_key": "${MAXCOMPUTE_SECRET_KEY}",
+      "endpoint": "http://service.cn.maxcompute.aliyun.com/api"
+    },
+    "table_name": "ods_orders"
+  },
+  "run": {
+    "mode": "append",
+    "batch_size": 50000,
+    "log_level": "INFO"
+  },
+  "compat": {
+    "preserve_string_null_tokens": true,
+    "string_null_tokens": ["NULL", "null", ""],
+    "null_on_non_nullable": "fill",
+    "null_fill_sentinel": ""
+  }
+}

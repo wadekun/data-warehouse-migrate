@@ -11,6 +11,9 @@
 - 🐳 支持Docker部署
 - 📝 完善的日志记录和错误处理
 - 🧪 支持试运行模式，验证配置和连接
+- 🔄 支持MaxCompute、MySQL、BigQuery之间的双向数据迁移
+- 🎯 智能类型转换，自动处理各种数据类型映射
+- 📋 支持列映射、重命名、计算列（仅MySQL目标）
 
 ## 安装
 
@@ -42,20 +45,27 @@ docker-compose build
 创建 `.env` 文件（参考 `.env.example`）：
 
 ```bash
-# MaxCompute配置
+# MaxCompute配置（源和目标通用）
 MAXCOMPUTE_ACCESS_ID=your_access_id
 MAXCOMPUTE_SECRET_ACCESS_KEY=your_secret_key
 MAXCOMPUTE_ENDPOINT=http://service.cn.maxcompute.aliyun.com/api
 
-# BigQuery配置
+# BigQuery配置（仅目标）
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/bigquery-credentials.json
 
-# MySQL目标配置
+# MySQL源配置（MySQL -> MaxCompute）
+MYSQL_SOURCE_HOST=localhost
+MYSQL_SOURCE_PORT=3306
+MYSQL_SOURCE_USER=your_username
+MYSQL_SOURCE_PASSWORD=your_password
+MYSQL_SOURCE_DATABASE=your_source_database
+
+# MySQL目标配置（MaxCompute -> MySQL）
 MYSQL_DEST_HOST=your_mysql_host
+MYSQL_DEST_PORT=3306
 MYSQL_DEST_USER=your_mysql_user
 MYSQL_DEST_PASSWORD=your_mysql_password
 MYSQL_DEST_DATABASE=your_mysql_database
-MYSQL_DEST_PORT=3306
 
 # 日志配置
 LOG_LEVEL=INFO
@@ -66,6 +76,23 @@ LOG_LEVEL=INFO
 1. 在Google Cloud Console中创建服务账号
 2. 下载服务账号的JSON凭证文件
 3. 设置环境变量 `GOOGLE_APPLICATION_CREDENTIALS` 指向该文件
+
+### 类型映射说明
+
+#### MySQL到MaxCompute的特殊处理
+
+1. **TINYINT(1) → BOOLEAN**
+   - 非空的 `tinyint(1)` 自动转换为boolean类型
+   - 可通过配置文件手动覆盖为tinyint
+   - 日志会输出WARNING提示
+
+2. **ENUM/SET → STRING**
+   - 枚举和集合类型自动转换为string
+
+3. **自增属性**
+   - MaxCompute不支持自增，将作为普通列迁移
+
+更多详情请参考 [类型映射注意事项](docs/type-mapping-considerations.md)
 
 ## 使用方法
 
