@@ -233,7 +233,8 @@ class DataMigrator:
                 source_table_name,
                 destination_table_name,
                 mode,
-                batch_size
+                batch_size,
+                destination_dataset_id=destination_dataset_id
             )
             
             logger.info(f"表迁移完成: {source_table_name} -> {destination_table_name}")
@@ -375,7 +376,8 @@ class DataMigrator:
                           source_table_name: str,
                           destination_table_name: str,
                           mode: MigrationMode,
-                          batch_size: int) -> None:
+                          batch_size: int,
+                          destination_dataset_id: Optional[str] = None) -> None:
         """迁移表数据"""
         logger.info("开始迁移数据...")
 
@@ -425,11 +427,19 @@ class DataMigrator:
                     typed_df = self._validate_non_nullable_columns_before_write(typed_df, full_destination_schema)
 
                 # 加载数据到目标
-                self.destination_client.write_dataframe(
-                    destination_table_name,
-                    typed_df,
-                    mode.value # Pass mode as string (overwrite/append)
-                )
+                if self.destination_type == 'bigquery':
+                    self.destination_client.write_dataframe(
+                        destination_table_name,
+                        typed_df,
+                        mode.value,
+                        dataset_id=destination_dataset_id
+                    )
+                else:
+                    self.destination_client.write_dataframe(
+                        destination_table_name,
+                        typed_df,
+                        mode.value
+                    )
             
             logger.info(f"数据迁移完成，总共处理 {batch_count} 批次，{total_rows} 行数据")
             

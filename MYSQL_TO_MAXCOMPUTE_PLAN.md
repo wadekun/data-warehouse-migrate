@@ -1,4 +1,4 @@
-# MySQL 到 MaxCompute 双向同步改造方案
+# ~~MySQL 到 MaxCompute 双向同步改造方案~~
 
 本文档详细说明了将现有 `data-warehouse-migrate` 工具从单纯的 "MaxCompute -> BigQuery/MySQL" 扩展为支持 "MySQL -> MaxCompute" 的双向迁移工具的改造方案。
 

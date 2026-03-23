@@ -394,6 +394,30 @@ class BigQueryClient:
             logger.error(f"BigQuery连接测试失败: {e}")
             return False
 
+    def write_dataframe(self, table_name: str, dataframe: pd.DataFrame,
+                        mode: str = 'append', dataset_id: str = None) -> None:
+        """
+        写入DataFrame数据（统一接口，供DataMigrator调用）
+
+        Args:
+            table_name: 表名（即table_id）
+            dataframe: 数据
+            mode: 写入模式 'append' 或 'overwrite'
+            dataset_id: BigQuery数据集ID
+        """
+        if not dataset_id:
+            raise BigQueryConnectionError("BigQuery写入需要提供dataset_id")
+
+        write_disposition = (
+            bigquery.WriteDisposition.WRITE_TRUNCATE
+            if mode == 'overwrite'
+            else bigquery.WriteDisposition.WRITE_APPEND
+        )
+        self.load_data_from_dataframe(
+            dataset_id, table_name, dataframe,
+            write_disposition=write_disposition
+        )
+
     def _test_connection(self) -> bool:
         """内部测试连接方法（为了兼容性）"""
         return self.test_connection()
