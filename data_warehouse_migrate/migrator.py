@@ -384,6 +384,10 @@ class DataMigrator:
         batch_count = 0
         total_rows = 0
 
+        # overwrite 语义已在 _handle_table_schema 中通过删表/truncate 完成，
+        # 分批写入时始终使用 append，避免每批覆盖前一批数据
+        write_mode = 'append'
+
         try:
             # 使用源客户端获取数据
             data_iterator = self.source_client.get_table_data(
@@ -431,14 +435,14 @@ class DataMigrator:
                     self.destination_client.write_dataframe(
                         destination_table_name,
                         typed_df,
-                        mode.value,
+                        write_mode,
                         dataset_id=destination_dataset_id
                     )
                 else:
                     self.destination_client.write_dataframe(
                         destination_table_name,
                         typed_df,
-                        mode.value
+                        write_mode
                     )
             
             logger.info(f"数据迁移完成，总共处理 {batch_count} 批次，{total_rows} 行数据")
@@ -542,19 +546,18 @@ class DataMigrator:
 
         # 处理布尔类型
         elif 'boolean' in maxcompute_type:
-            # 转换布尔值
             def convert_bool(val):
                 if pd.isna(val) or val is None:
-                    return None
+                    return pd.NA
                 val_str = str(val).strip().lower()
                 if val_str in ['true', '1', 'yes', 'y']:
                     return True
                 elif val_str in ['false', '0', 'no', 'n', '']:
                     return False
                 else:
-                    return None
+                    return pd.NA
 
-            result = series.apply(convert_bool)
+            result = series.apply(convert_bool).astype(pd.BooleanDtype())
             logger.debug(f"列 {column_name} 转换为布尔类型（源表为boolean类型）")
             return result
 

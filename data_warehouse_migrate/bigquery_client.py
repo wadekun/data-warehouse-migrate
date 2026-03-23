@@ -293,9 +293,8 @@ class BigQueryClient:
                         compatible_df[column] = compatible_df[column].astype('int64')
 
                 elif dtype == 'boolean':
-                    # 处理nullable boolean
-                    compatible_df[column] = compatible_df[column].fillna(False).astype('bool')
-                    logger.debug(f"列 {column} 从boolean转换为bool")
+                    # pandas BooleanDtype 可直接被 pyarrow 转换，保留 NULL 语义
+                    logger.debug(f"列 {column} 保持为 pandas nullable boolean（pyarrow 原生支持）")
 
                 elif dtype == 'string':
                     # 处理pandas string类型
