@@ -4,7 +4,8 @@
 处理MaxCompute和BigQuery之间的数据类型转换
 """
 
-from typing import Dict, Any, List
+import re
+from typing import Dict, Any, List, Optional, Tuple
 from google.cloud import bigquery
 
 from .exceptions import SchemaConversionError
@@ -297,6 +298,23 @@ class SchemaMapper:
                 description=comment
             )
     
+    # BigQuery NUMERIC 支持的最大 precision/scale
+    # NUMERIC: precision<=38, scale<=9 (decimal128, 16 bytes)
+    # BIGNUMERIC: precision<=76, scale<=38 (decimal256, 32 bytes)
+    _BQ_NUMERIC_MAX_PRECISION = 38
+    _BQ_NUMERIC_MAX_SCALE = 9
+
+    @classmethod
+    def _parse_decimal_params(cls, maxcompute_type: str) -> Tuple[Optional[int], Optional[int]]:
+        """
+        解析 decimal(p,s) 的精度与小数位。
+        匹配失败返回 (None, None)，由上层按默认规则处理。
+        """
+        m = re.match(r'\s*decimal\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*$', maxcompute_type.lower())
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        return None, None
+
     @classmethod
     def _get_bigquery_type(cls, maxcompute_type: str) -> str:
         """
@@ -310,7 +328,24 @@ class SchemaMapper:
         """
         # 处理带精度的类型，如 decimal(10,2)
         base_type = maxcompute_type.split('(')[0].lower()
-        
+
+        # decimal 特殊处理：根据 precision/scale 选择 NUMERIC 或 BIGNUMERIC
+        # - NUMERIC   : precision<=38 且 scale<=9
+        # - BIGNUMERIC: 其余（包含未显式带精度的 decimal，按更宽容的 BIGNUMERIC 处理）
+        if base_type == 'decimal':
+            precision, scale = cls._parse_decimal_params(maxcompute_type)
+            if (precision is not None and scale is not None
+                    and precision <= cls._BQ_NUMERIC_MAX_PRECISION
+                    and scale <= cls._BQ_NUMERIC_MAX_SCALE):
+                return bigquery.enums.SqlTypeNames.NUMERIC
+            # 超出 NUMERIC 能力或未知精度，使用 BIGNUMERIC 保留精度
+            if precision is not None and scale is not None:
+                logger.info(
+                    f"decimal({precision},{scale}) 超出 BigQuery NUMERIC 能力(p<=38,s<=9)，"
+                    f"使用 BIGNUMERIC"
+                )
+            return bigquery.enums.SqlTypeNames.BIGNUMERIC
+
         if base_type in cls.TYPE_MAPPING:
             return cls.TYPE_MAPPING[base_type]
         else:

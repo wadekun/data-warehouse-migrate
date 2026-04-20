@@ -111,3 +111,47 @@ class TestSchemaMapper:
         field = bigquery_fields[0]
         assert field.name == 'price'
         assert field.field_type == bigquery.enums.SqlTypeNames.NUMERIC
+
+    def test_decimal_within_numeric_bounds(self):
+        """decimal(p<=38, s<=9) 应映射为 NUMERIC"""
+        columns = [
+            {'name': 'a', 'type': 'decimal(10,2)', 'comment': ''},
+            {'name': 'b', 'type': 'decimal(38,9)', 'comment': ''},
+            {'name': 'c', 'type': 'decimal(5,0)', 'comment': ''},
+        ]
+        fields = SchemaMapper.convert_maxcompute_to_bigquery_schema(columns)
+        for f in fields:
+            assert f.field_type == bigquery.enums.SqlTypeNames.NUMERIC, f.name
+
+    def test_decimal_requires_bignumeric_on_scale_overflow(self):
+        """decimal scale>9 必须升级为 BIGNUMERIC（这是原 bug 场景）"""
+        columns = [
+            {'name': 'gross_revenue', 'type': 'decimal(38,18)', 'comment': ''},
+            {'name': 'big', 'type': 'decimal(76,38)', 'comment': ''},
+        ]
+        fields = SchemaMapper.convert_maxcompute_to_bigquery_schema(columns)
+        for f in fields:
+            assert f.field_type == bigquery.enums.SqlTypeNames.BIGNUMERIC, f.name
+
+    def test_decimal_requires_bignumeric_on_precision_overflow(self):
+        """decimal precision>38 必须升级为 BIGNUMERIC"""
+        columns = [
+            {'name': 'x', 'type': 'decimal(50,4)', 'comment': ''},
+        ]
+        fields = SchemaMapper.convert_maxcompute_to_bigquery_schema(columns)
+        assert fields[0].field_type == bigquery.enums.SqlTypeNames.BIGNUMERIC
+
+    def test_decimal_without_precision_uses_bignumeric(self):
+        """未显式指定精度的 decimal，按更宽容的 BIGNUMERIC 处理"""
+        columns = [
+            {'name': 'x', 'type': 'decimal', 'comment': ''},
+        ]
+        fields = SchemaMapper.convert_maxcompute_to_bigquery_schema(columns)
+        assert fields[0].field_type == bigquery.enums.SqlTypeNames.BIGNUMERIC
+
+    def test_parse_decimal_params(self):
+        """内部 decimal 参数解析"""
+        assert SchemaMapper._parse_decimal_params('decimal(38,18)') == (38, 18)
+        assert SchemaMapper._parse_decimal_params('DECIMAL(10, 2)') == (10, 2)
+        assert SchemaMapper._parse_decimal_params('decimal') == (None, None)
+        assert SchemaMapper._parse_decimal_params('bigint') == (None, None)

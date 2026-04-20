@@ -2,6 +2,7 @@
 BigQuery客户端模块
 """
 
+from decimal import Decimal
 from typing import List, Optional
 import pandas as pd
 from google.cloud import bigquery
@@ -305,14 +306,24 @@ class BigQueryClient:
                 elif dtype == 'object':
                     # 对于object类型，尽量保持字符串字面量，仅做必要的安全转换
                     logger.debug(f"处理object类型列: {column}")
-                    try:
-                        # 保存None位置并转换为字符串，不替换字面量空值
-                        mask_none = compatible_df[column].isna()
-                        compatible_df[column] = compatible_df[column].astype(str)
-                        compatible_df.loc[mask_none, column] = None
-                    except Exception as e:
-                        logger.warning(f"列 {column} 字符串转换失败: {e}，用None填充")
-                        compatible_df[column] = None
+                    # 若该列承载的是 Decimal 对象（来自 decimal 源字段），
+                    # 必须原样保留，以便 pyarrow 正确转换为 NUMERIC/BIGNUMERIC。
+                    sample_non_null = compatible_df[column].dropna().head(1)
+                    is_decimal_column = (
+                        not sample_non_null.empty
+                        and isinstance(sample_non_null.iloc[0], Decimal)
+                    )
+                    if is_decimal_column:
+                        logger.debug(f"列 {column} 检测到 Decimal 对象，跳过字符串化以保留数值类型")
+                    else:
+                        try:
+                            # 保存None位置并转换为字符串，不替换字面量空值
+                            mask_none = compatible_df[column].isna()
+                            compatible_df[column] = compatible_df[column].astype(str)
+                            compatible_df.loc[mask_none, column] = None
+                        except Exception as e:
+                            logger.warning(f"列 {column} 字符串转换失败: {e}，用None填充")
+                            compatible_df[column] = None
 
                 # 最后检查：确保没有复杂的嵌套结构
                 if compatible_df[column].dtype == 'object':

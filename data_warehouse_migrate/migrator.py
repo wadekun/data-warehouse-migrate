@@ -4,6 +4,7 @@
 
 from typing import Optional, List, Dict, Any
 import string
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from tqdm import tqdm
 import pandas as pd
@@ -538,8 +539,28 @@ class DataMigrator:
                 logger.debug(f"列 {column_name} 转换为int64（源表为整数类型）")
             return result
 
-        # 处理浮点数类型
-        elif any(t in maxcompute_type for t in ['double', 'float', 'decimal']):
+        # 处理 decimal 类型：使用 Python Decimal 对象承载，避免 float64 精度丢失
+        # 以及 pyarrow 在对齐 BigQuery NUMERIC/BIGNUMERIC 时出现字节缓冲区长度不一致
+        # (例如 "Got bytestring of length 8 (expected 16)")。
+        elif 'decimal' in maxcompute_type:
+            def _to_decimal(v: Any):
+                if v is None:
+                    return None
+                if isinstance(v, Decimal):
+                    return v
+                if isinstance(v, float) and pd.isna(v):
+                    return None
+                try:
+                    return Decimal(str(v))
+                except (InvalidOperation, ValueError):
+                    return None
+
+            result = series.map(_to_decimal).astype(object)
+            logger.debug(f"列 {column_name} 转换为 Decimal 对象（源表类型: {maxcompute_type}）")
+            return result
+
+        # 处理浮点数类型（非 decimal）
+        elif any(t in maxcompute_type for t in ['double', 'float']):
             result = pd.to_numeric(series, errors='coerce').astype('float64')
             logger.debug(f"列 {column_name} 转换为float64（源表为浮点类型）")
             return result
