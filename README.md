@@ -125,6 +125,7 @@ data-warehouse-migrate [OPTIONS]
 - `--mysql-dest-database`: MySQL目标数据库
 - `--mysql-dest-port`: MySQL目标端口
 - `--log-level`: 日志级别，可选值：`DEBUG`, `INFO`, `WARNING`, `ERROR`，默认为 `INFO`
+- `--partition-filter`: MaxCompute 分区过滤条件（仅当源为 MaxCompute 分区表时生效），如 `"pt='20240501'"` 或 `"pt>='20240401' AND pt<='20240430'"`；设为 `"*"` 查询所有分区；不指定时自动选择最新分区
 - `--dry-run`: 试运行模式，只检查连接和表结构，不实际迁移数据
 
 ### 使用示例
@@ -155,6 +156,29 @@ data-warehouse-migrate \
   --mysql-dest-database my_database \
   --destination-table-name orders_from_maxcompute \
   --mode overwrite
+```
+
+#### 指定分区查询（MaxCompute 源）
+
+```bash
+# 查询指定日分区
+data-warehouse-migrate \
+  --source-project-id my-maxcompute-project \
+  --source-table-name orders \
+  --destination-type mysql \
+  --destination-table-name orders_from_maxcompute \
+  --partition-filter "pt='20240501'" \
+  --mode overwrite
+
+# 查询分区范围
+data-warehouse-migrate \
+  --partition-filter "pt>='20240401' AND pt<='20240430'" \
+  -f conf.json
+
+# 查询所有分区数据
+data-warehouse-migrate \
+  --partition-filter "*" \
+  -f conf.json
 ```
 
 #### 试运行
@@ -200,7 +224,7 @@ data-warehouse-migrate -f conf.json
 
 ```json
 {
-  "source": {"project_id": "bybest", "table_name": "ods_lm_spu"},
+  "source": {"project_id": "bybest", "table_name": "ods_lm_spu", "partition_filter": "pt='20240501'"},
   "destination": {
     "type": "mysql",
     "table_name": "lm_spu",
@@ -415,14 +439,34 @@ docker-compose up
 
 ## 分区表处理
 
-工具自动处理MaxCompute分区表：
+工具自动处理MaxCompute分区表，并支持通过参数指定查询分区：
 
 1. **自动检测分区表**：工具会自动检测源表是否为分区表
-2. **智能分区选择**：
+2. **用户指定分区（推荐）**：
+   - 通过 `--partition-filter` CLI 参数或配置文件中 `source.partition_filter` 指定分区条件
+   - 支持精确匹配：`"pt='20240501'"`
+   - 支持范围查询：`"pt>='20240401' AND pt<='20240430'"`
+   - 支持多级分区：`"pt='20240501' AND region='us'"`
+   - 设为 `"*"` 查询所有分区数据（注意数据量）
+3. **自动分区选择（fallback）**：未指定 `partition_filter` 时，自动使用以下策略：
    - 优先查找 `pt` 分区字段，使用最新分区数据
    - 如果没有 `pt` 字段，使用所有分区字段的最新值
    - 自动构建带分区条件的查询SQL，避免全表扫描错误
-3. **分区字段处理**：分区字段不会在BigQuery目标表中创建，只用于数据筛选
+4. **参数优先级**：`--partition-filter` CLI > 配置文件 `source.partition_filter` > 自动选择最新分区
+5. **分区字段处理**：分区字段不会在目标表中创建，只用于数据筛选
+
+配置文件示例（分组键写法）：
+
+```json
+{
+  "source": {
+    "type": "maxcompute",
+    "project_id": "bybest",
+    "table_name": "ads_ls_stock_advice_dim",
+    "partition_filter": "pt='20240501'"
+  }
+}
+```
 
 ## 数据类型兼容性处理
 
@@ -506,7 +550,11 @@ data-warehouse-migrate/
 3. **网络连接**：
    - 确保网络连接稳定，大数据量迁移可能需要较长时间
 
-4. **成本考虑**：
+4. **分区数据量**：
+   - 使用 `--partition-filter "*"` 查询所有分区时，请注意数据量可能很大，建议先使用 `--dry-run` 验证
+   - 范围分区查询同理，建议配合 `--batch-size` 控制内存使用
+
+5. **成本考虑**：
    - BigQuery按查询和存储收费，请注意成本控制
 
 ## 故障排除

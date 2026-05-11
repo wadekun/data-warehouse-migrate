@@ -103,7 +103,8 @@ class MaxComputeClient:
             raise TableNotFoundError(f"获取表 {table_name} 结构失败: {e}")
     
     def get_table_data(self, table_name: str, limit: Optional[int] = None,
-                      batch_size: int = 10000) -> Iterator[pd.DataFrame]:
+                      batch_size: int = 10000,
+                      partition_filter: Optional[str] = None) -> Iterator[pd.DataFrame]:
         """
         获取表数据
 
@@ -111,6 +112,7 @@ class MaxComputeClient:
             table_name: 表名
             limit: 限制行数
             batch_size: 批次大小
+            partition_filter: 分区过滤条件，如 "pt='20240501'"；设为 "*" 查询所有分区
 
         Yields:
             DataFrame批次数据
@@ -121,7 +123,8 @@ class MaxComputeClient:
                 raise TableNotFoundError(f"表 {table_name} 不存在")
 
             # 构建查询SQL，处理分区表
-            sql = self._build_select_sql(table, table_name, limit)
+            sql = self._build_select_sql(table, table_name, limit,
+                                         partition_filter=partition_filter)
 
             logger.info(f"开始读取表 {table_name} 的数据，SQL: {sql}")
             
@@ -162,7 +165,8 @@ class MaxComputeClient:
             logger.error(f"读取表数据失败: {e}")
             raise MaxComputeConnectionError(f"读取表 {table_name} 数据失败: {e}")
 
-    def _build_select_sql(self, table, table_name: str, limit: Optional[int] = None) -> str:
+    def _build_select_sql(self, table, table_name: str, limit: Optional[int] = None,
+                          partition_filter: Optional[str] = None) -> str:
         """
         构建查询SQL，处理分区表
 
@@ -170,13 +174,26 @@ class MaxComputeClient:
             table: MaxCompute表对象
             table_name: 表名
             limit: 限制行数
+            partition_filter: 用户指定的分区过滤条件；"*" 表示查询所有分区
 
         Returns:
             构建的SQL语句
         """
         sql = f"SELECT * FROM {table_name}"
 
-        # 检查是否为分区表
+        # 用户显式指定了分区条件，优先使用
+        if partition_filter:
+            if partition_filter.strip() == '*':
+                logger.info(f"用户指定查询所有分区数据（partition_filter='*'）")
+            else:
+                sql += f" WHERE {partition_filter}"
+                logger.info(f"使用用户指定的分区条件: {partition_filter}")
+
+            if limit:
+                sql += f" LIMIT {limit}"
+            return sql
+
+        # 未指定 partition_filter，使用自动检测逻辑
         if hasattr(table.table_schema, 'partitions') and table.table_schema.partitions:
             partition_columns = [p.name for p in table.table_schema.partitions]
             logger.info(f"表 {table_name} 是分区表，分区字段: {partition_columns}")
@@ -300,12 +317,14 @@ class MaxComputeClient:
             logger.error(f"获取最新分区失败: {e}")
             return {}
 
-    def validate_table_access(self, table_name: str) -> bool:
+    def validate_table_access(self, table_name: str,
+                              partition_filter: Optional[str] = None) -> bool:
         """
         验证表是否可以正常访问（特别是分区表）
 
         Args:
             table_name: 表名
+            partition_filter: 分区过滤条件
 
         Returns:
             是否可以访问
@@ -316,7 +335,8 @@ class MaxComputeClient:
                 return False
 
             # 构建测试查询SQL
-            test_sql = self._build_select_sql(table, table_name, limit=1)
+            test_sql = self._build_select_sql(table, table_name, limit=1,
+                                              partition_filter=partition_filter)
 
             # 执行测试查询
             with self.odps.execute_sql(test_sql).open_reader() as reader:

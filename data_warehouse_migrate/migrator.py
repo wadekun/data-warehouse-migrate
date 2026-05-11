@@ -59,7 +59,8 @@ class DataMigrator:
                  string_null_tokens: Optional[List[str]] = None,
                  null_on_non_nullable: str = 'fail',
                  null_fill_sentinel: Optional[str] = None,
-                 column_mapping_plan: Optional[Dict[str, Any]] = None):
+                 column_mapping_plan: Optional[Dict[str, Any]] = None,
+                 partition_filter: Optional[str] = None):
         """
         初始化数据迁移器
 
@@ -83,6 +84,7 @@ class DataMigrator:
             mysql_dest_database: MySQL目标数据库
             mysql_dest_port: MySQL目标端口
             bigquery_credentials_path: BigQuery凭证文件路径
+            partition_filter: MaxCompute分区过滤条件，如 "pt='20240501'"；"*" 查询所有分区
         """
         # 设置默认值以保持向后兼容
         if source_type is None:
@@ -135,6 +137,7 @@ class DataMigrator:
         self.null_on_non_nullable = (null_on_non_nullable or 'fail').lower()
         self.null_fill_sentinel = null_fill_sentinel
         self.column_mapping_plan = column_mapping_plan if column_mapping_plan else None
+        self.partition_filter = partition_filter
 
     def _create_source_client(self, source_type: str, **kwargs):
         """创建源客户端"""
@@ -391,9 +394,12 @@ class DataMigrator:
 
         try:
             # 使用源客户端获取数据
+            get_data_kwargs = {'batch_size': batch_size}
+            if self.source_type == 'maxcompute' and self.partition_filter:
+                get_data_kwargs['partition_filter'] = self.partition_filter
             data_iterator = self.source_client.get_table_data(
                 source_table_name,
-                batch_size=batch_size
+                **get_data_kwargs
             )
             
             for batch_df in tqdm(data_iterator, desc="迁移数据批次"):

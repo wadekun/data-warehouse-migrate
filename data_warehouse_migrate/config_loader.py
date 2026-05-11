@@ -95,6 +95,8 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
             out.setdefault("maxcompute_secret_key", source.get("maxcompute_secret_key"))
         if "maxcompute_endpoint" in source:
             out.setdefault("maxcompute_endpoint", source.get("maxcompute_endpoint"))
+        if "partition_filter" in source:
+            out.setdefault("partition_filter", source.get("partition_filter"))
         # MySQL源配置
         mysql_source = source.get("mysql") or {}
         if isinstance(mysql_source, dict):
@@ -220,6 +222,9 @@ def merge_with_cli_and_env(cli_args: Dict[str, Any], file_cfg: Dict[str, Any], e
     pick("destination_project_id", cli_args.get("destination_project_id"), env_val=None)
     pick("destination_dataset_id", cli_args.get("destination_dataset_id"), env_val=None)
     pick("destination_table_name", cli_args.get("destination_table_name"), env_val=None)
+
+    # 分区过滤条件（仅 MaxCompute 源有效）
+    pick("partition_filter", cli_args.get("partition_filter"), env_val=None)
 
     # MaxCompute
     pick("maxcompute_access_id", cli_args.get("maxcompute_access_id"), env_val=env_cfg.maxcompute_access_id)

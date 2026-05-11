@@ -90,6 +90,11 @@ logger = setup_logger(__name__)
 @click.option('--null-fill-sentinel',
               default=None,
               help='当策略为fill时用于填充字符串/日期列的哨兵值，如 "N/A" 或 空字符串')
+@click.option('--partition-filter',
+              default=None,
+              help='MaxCompute分区过滤条件，如: "pt=\'20240501\'" 或 '
+                   '"pt>=\'20240401\' AND pt<=\'20240501\'"。'
+                   '设为 "*" 查询所有分区。仅当源为MaxCompute分区表时生效。')
 @click.option('--dry-run',
               is_flag=True,
               help='试运行模式，只检查连接和表结构，不实际迁移数据（适用于所有数据流方向）')
@@ -123,6 +128,7 @@ def main(source_type: str,
          string_null_tokens: Optional[str],
          null_on_non_nullable: Optional[str],
          null_fill_sentinel: Optional[str],
+         partition_filter: Optional[str],
          log_level: str,
          dry_run: bool,
          config_file: Optional[str]):
@@ -176,6 +182,7 @@ def main(source_type: str,
             "string_null_tokens": string_null_tokens,
             "null_on_non_nullable": null_on_non_nullable,
             "null_fill_sentinel": null_fill_sentinel,
+            "partition_filter": partition_filter,
             "log_level": log_level,
             "dry_run": dry_run,
         }
@@ -213,6 +220,7 @@ def main(source_type: str,
         tokens = final_args.get("string_null_tokens", config.string_null_tokens)
         null_policy = final_args.get("null_on_non_nullable", config.null_on_non_nullable)
         null_sentinel = final_args.get("null_fill_sentinel", config.null_fill_sentinel)
+        partition_filter = final_args.get("partition_filter", partition_filter)
         log_level = final_args.get("log_level", log_level)
         dry_run = final_args.get("dry_run", dry_run)
 
@@ -246,6 +254,8 @@ def main(source_type: str,
         click.echo(f"目标表名: {destination_table_name}")
         click.echo(f"迁移模式: {mode}")
         click.echo(f"批次大小: {batch_size}")
+        if source_type == 'maxcompute' and partition_filter:
+            click.echo(f"分区条件: {partition_filter}")
         click.echo(f"日志级别: {log_level}")
         if dry_run:
             click.echo("模式: 试运行 (不会实际迁移数据)")
@@ -302,7 +312,8 @@ def main(source_type: str,
             string_null_tokens=tokens,
             null_on_non_nullable=null_policy,
             null_fill_sentinel=null_sentinel,
-            column_mapping_plan=active_mapping if destination_type == 'mysql' else None
+            column_mapping_plan=active_mapping if destination_type == 'mysql' else None,
+            partition_filter=partition_filter if source_type == 'maxcompute' else None
         )
         
         # 转换迁移模式
@@ -424,10 +435,16 @@ def _dry_run(migrator: DataMigrator,
     click.echo("   ✓ 连接测试通过")
 
     click.echo("2. 验证源表访问权限...")
+    if migrator.source_type == 'maxcompute' and migrator.partition_filter:
+        click.echo(f"   分区过滤条件: {migrator.partition_filter}")
+    elif migrator.source_type == 'maxcompute':
+        click.echo("   分区策略: 自动选择最新分区")
     # 根据源类型进行不同的验证
     if migrator.source_type == 'maxcompute':
         if hasattr(migrator.source_client, 'validate_table_access'):
-            if migrator.source_client.validate_table_access(source_table_name):
+            pf = migrator.partition_filter if migrator.source_type == 'maxcompute' else None
+            if migrator.source_client.validate_table_access(source_table_name,
+                                                            partition_filter=pf):
                 click.echo("   ✓ MaxCompute源表访问验证成功")
             else:
                 click.echo("   ✗ MaxCompute源表访问验证失败")
